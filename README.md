@@ -181,7 +181,7 @@ http://<STB_IP>:8080
 
 ## 🔒 Bootloader & Hardware Architecture Notes
 
-### Why Flashing Raw Partitions Bricks the Box
+### 1. Why a "100% Wiped Hardware Custom ROM" Cannot Be Flashed Over Software
 Many users ask: *"Can I flash LineageOS, AOSP GSI, or SlimBOXtv directly over fastboot or USB Burning Tool?"*
 
 ```text
@@ -190,10 +190,45 @@ Many users ask: *"Can I flash LineageOS, AOSP GSI, or SlimBOXtv directly over fa
 [ro.boot.vbmeta.invalidate_on_error]: [yes]
 ```
 
-* The **Amlogic S905X2** SoC has write-once hardware **eFuses** burned at the factory with Reliance Jio's private RSA keys.
-* Android Verified Boot (AVB 1.1) and dm-verity cryptographically sign `/dev/block/super` (`system`, `vendor`, `product`) and `boot`.
-* If you overwrite partitions with an unsigned generic custom ROM over software, the hardware bootloader detects a checksum failure and **permanently halts boot**. The box becomes a **hard-bricked dead brick**.
-* The **Systemless Debloating Method** documented here gives you 100% of the benefits (clean launcher, ad-free streaming, zero Jio tracking, permanent ADB) while keeping the signed hardware drivers stable and safe.
+* **Hardware eFuse Protection**: The Amlogic S905X2 SoC has write-once hardware eFuses burned by Reliance at the factory containing their private RSA master keys.
+* **Cryptographic Signature Checks**: The hardware bootloader (`u-boot`) will **only execute partitions signed by Reliance Jio's private key**.
+* **What Happens if You Force-Flash an Unsigned ROM**: The bootloader checks the cryptographic hash tree on power-up. Because custom ROMs (like SlimBOX or LineageOS) are not signed with Reliance's private key, the signature check fails immediately. With `invalidate_on_error: yes`, the processor halts boot permanently. The box becomes a **hard-bricked dead brick with no display and no recovery**.
+* **The Systemless Solution**: The TR-069 exploit and ADB debloat documented here give you 100% of the benefits (clean launcher, ad-free streaming, zero Jio tracking, permanent ADB) while keeping the cryptographically signed bootloader and hardware drivers safe and intact.
+
+---
+
+### 2. The Hardware-Only Modification Method (Advanced Tinkering)
+For developers who want true low-level access to the Amlogic bootloader:
+
+* **Hardware Prerequisites**:
+  * USB-to-TTL Serial UART Adapter (CH340, CP2102, or FT232RL).
+  * Fine-tip soldering iron or pogo pins.
+  * Male-to-Male USB-A cable for Amlogic USB Burning Tool.
+* **UART Serial Console Access**:
+  1. Open the JHSD200 plastic casing (held by bottom plastic clips).
+  2. Locate the 4 unpopulated UART pads on the PCB near the SoC:
+     * `GND` $\rightarrow$ Connect to Adapter GND
+     * `TX` $\rightarrow$ Connect to Adapter RX
+     * `RX` $\rightarrow$ Connect to Adapter TX
+     * `VCC (3.3V)` $\rightarrow$ **DO NOT CONNECT** (box is powered by its 12V adapter)
+  3. Open a serial terminal on your PC:
+     ```bash
+     minicom -D /dev/ttyUSB0 -b 115200
+     ```
+  4. Power on the STB and press `Enter` or `Space` rapidly to interrupt u-boot and drop into the `g12a_franklin#` u-boot prompt.
+* **eMMC Clock Pin Shorting (Mask ROM Mode)**:
+  * If the bootloader console is locked or password-protected, locate the eMMC clock resistor (`CLK` to `GND`) near the eMMC NAND flash chip.
+  * Short the `CLK` pin to ground using tweezers while plugging in the USB-A cable connected to your PC.
+  * This forces the Amlogic boot ROM into **WorldCup Device mode** (`ID 1b8e:0c00`), allowing the Amlogic USB Burning Tool to interface directly with RAM.
+
+---
+
+### 3. Daily Usage: How to Never See the Jio Boot Screen
+The static Jio boot logo and startup animation only execute during a **cold boot** (when the physical 12V power adapter is unplugged from the wall).
+
+In normal everyday TV usage:
+* **Press the Power button on your remote**: The STB enters **instant Standby / Sleep** mode (HDMI and video processing sleep, box draws ~0.5W).
+* **Press Power again**: The TV **wakes up instantly in 0.5 seconds directly into Monet Launcher / Abhinav OS** with zero boot logos, zero loading delays, and zero Jio branding.
 
 ---
 
