@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Abhinav TV Remote</title>
+<style>
+  body {
+    background: #121820;
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    margin: 0;
+    user-select: none;
+  }
+  h2 { margin: 10px 0 5px; color: #8ab4f8; font-weight: 500; font-size: 22px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(3, 80px);
+    grid-gap: 15px;
+    margin: 20px 0;
+  }
+  .btn {
+    width: 80px;
+    height: 80px;
+    background: #1e2633;
+    border: 1px solid #2e3a4e;
+    border-radius: 50%;
+    color: #e8eaed;
+    font-size: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    transition: transform 0.1s, background 0.1s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .btn:active {
+    transform: scale(0.92);
+    background: #8ab4f8;
+    color: #121820;
+  }
+  .center {
+    background: #4285f4;
+    color: #fff;
+    font-weight: bold;
+    border-color: #8ab4f8;
+  }
+  .bar { display: flex; gap: 20px; margin-top: 15px; }
+  .bar-btn {
+    width: 90px;
+    height: 50px;
+    border-radius: 25px;
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .input-box { margin-top: 20px; display: flex; gap: 10px; width: 280px; }
+  input {
+    flex: 1;
+    padding: 12px;
+    border-radius: 20px;
+    border: 1px solid #2e3a4e;
+    background: #1a222d;
+    color: #fff;
+    outline: none;
+    font-size: 15px;
+    text-align: center;
+  }
+  input:focus { border-color: #8ab4f8; }
+  .status { font-size: 12px; color: #9aa0a6; margin-top: 15px; }
+</style>
+</head>
+<body>
+<h2>Abhinav TV</h2>
+<div class="grid">
+  <div></div>
+  <div class="btn" onclick="send(19)">&#9650;</div>
+  <div></div>
+  <div class="btn" onclick="send(21)">&#9664;</div>
+  <div class="btn center" onclick="send(23)">OK</div>
+  <div class="btn" onclick="send(22)">&#9654;</div>
+  <div></div>
+  <div class="btn" onclick="send(20)">&#9660;</div>
+  <div></div>
+</div>
+<div class="bar">
+  <div class="btn bar-btn" onclick="send(4)">Back</div>
+  <div class="btn bar-btn" onclick="send(3)">Home</div>
+</div>
+<div class="bar">
+  <div class="btn bar-btn" onclick="send(25)">Vol -</div>
+  <div class="btn bar-btn" onclick="send(24)">Vol +</div>
+</div>
+<div class="input-box">
+  <input type="text" id="txt" placeholder="Type text to TV..." onkeydown="if(event.key==='Enter')sendText()">
+</div>
+<div class="status">Connected over Local Wi-Fi (Port 8080)</div>
+<script>
+function send(code) {
+  if (navigator.vibrate) navigator.vibrate(40);
+  fetch('/k?c=' + code).catch(()=>{});
+}
+function sendText() {
+  const el = document.getElementById('txt');
+  if (!el.value) return;
+  fetch('/t?q=' + encodeURIComponent(el.value)).catch(()=>{});
+  el.value = '';
+}
+</script>
+</body>
+</html>
