@@ -32,3 +32,4 @@ for p in com.communitake.remotecontrolservice com.rjil.podlogservice com.jio.tr0
         echo "    [+] OK: $p is successfully removed."
     fi
 done
+

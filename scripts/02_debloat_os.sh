@@ -104,3 +104,4 @@ done
 
 echo "[+] Telemetry, TR-069, and bloatware packages successfully stripped!"
 echo "[+] Bluetooth remote control service (com.jio.remote.btserver) preserved."
+

@@ -26,3 +26,4 @@ adb shell "settings put global boot_sound 0"
 adb shell "settings put system boot_sound 0"
 
 echo "[+] Done! Device is now branded as '$CUSTOM_NAME'."
+

@@ -24,3 +24,4 @@ adb shell "wm density 320"
 CURRENT_RES=$(adb shell settings get global hdmi_current_resolution | tr -d '\r')
 echo "[+] Verification: Current HDMI setting is: $CURRENT_RES"
 echo "[+] Resolution is now locked to Full HD 1080p @ 60Hz across reboots."
+

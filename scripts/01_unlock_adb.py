@@ -50,3 +50,4 @@ def inject_adb_task(device_id="A38021-JHSD200-RFLSBCGE2028682"):
 if __name__ == "__main__":
     dev_id = sys.argv[1] if len(sys.argv) > 1 else "A38021-JHSD200-RFLSBCGE2028682"
     inject_adb_task(dev_id)
+

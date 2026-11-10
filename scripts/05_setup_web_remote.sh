@@ -31,3 +31,4 @@ STB_IP=$(adb shell "ip -o -4 addr show wlan0 2>/dev/null || ip -o -4 addr show e
 echo "[+] Web Remote successfully deployed and running!"
 echo "[+] Open this URL on your phone's browser: http://$STB_IP:8080"
 echo "    Tip: Tap 'Add to Home Screen' in Chrome or Safari for a full-screen app!"
+
