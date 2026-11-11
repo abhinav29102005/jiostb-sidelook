@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TV Connect</string>
+    <string name="acc_desc">Reboot-persistent Live Mirror fallback gateway, remote gesture injector, and Jio remote button remapper.</string>
+</resources>
+

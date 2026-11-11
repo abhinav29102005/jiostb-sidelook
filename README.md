@@ -179,31 +179,38 @@ http://<STB_IP>:8088/?token=<TOKEN>
 
 ---
 
-## 🌐 Step 6: Anywhere Connection API & Remote Access (Over Any Network)
+## 🌐 Step 6: Live Mirror Gateway & Anywhere Control API (Any Network + Reboot-Persistent)
 
-To control the STB from **any Wi-Fi or 4G/5G cellular network worldwide** without port forwarding or leaving a PC on:
+View the STB live display and control it (mouse tap/drag, keyboard arrows/typing, volume, app launching) from **this laptop or any browser on any network worldwide**:
 
-1. Deploy the native Go Connection API server (`tools/tvconnect.go`) on port `8088`:
+1. Deploy both the **native Go Live Mirror Gateway** (`:8088`) and the **reboot-persistent Android AccessibilityService** (`com.abhinav.tvconnect`, `:8089` + automatic `:8088` fallback & physical remote button remapper):
    ```bash
    ./scripts/06_setup_anywhere_api.sh
    ```
-   This compiles & starts `tvconnect` (with `tools/daemonize.c`) and writes a unique API token to `/sdcard/tv_connect_token.txt`.
-2. Install **Tailscale** (`com.tailscale.ipn`) on the STB and sign in once to join your private encrypted tailnet (`100.x.x.x`).
-3. From anywhere on any network, access:
-   * **Web Dashboard & Live Screen:** `http://<TAILSCALE_IP>:8088/?token=<TOKEN>`
-   * **Remote ADB:** `adb connect <TAILSCALE_IP>:5555`
-   * **REST API Endpoints** (authenticate via `?token=<TOKEN>`, `X-API-Key: <TOKEN>`, or `Authorization: Bearer <TOKEN>`):
-     * `GET /api/ping` — unauthenticated liveness check
-     * `GET /api/health` — device model, Wi-Fi IP, Tailscale IP, active IME
-     * `GET /api/key?code=23` — send Android keycode (`3`=Home, `4`=Back, `19/20/21/22`=D-Pad, `23`=OK, `24/25`=Vol, `85`=Play/Pause)
-     * `GET /api/text?q=hello` — type text into focused TV input
-     * `GET /api/tap?x=960&y=540` / `GET /api/swipe?x1=...&y1=...&x2=...&y2=...` — touch injection
-     * `GET /api/launch?pkg=com.abhinav.cinejoy` — launch any app
-     * `GET /api/open?url=https://...` — open URL on TV
-     * `GET /api/apps` — list installed 3rd-party packages
-     * `GET /api/screen` — live `image/png` TV screenshot
+   * Go `tvconnect` (`tools/tvconnect.go` + `tools/daemonize.c`) serves hardware H.264 + raw-RGBA MJPEG live mirroring and ordered input injection on port `8088`.
+   * `com.abhinav.tvconnect` (`tools/tvconnect_app/`) stays enabled across **every reboot automatically without ADB/laptop** via `TvAccessibilityService`, serving fallback `/api/mirror.mjpeg` / `/api/tap` / `/api/swipe` / `/api/key` (`:8089` and `:8088` if Go isn't started) and remapping unused remote keys (`RED` $\rightarrow$ Cinejoy, `GREEN` $\rightarrow$ SmartTube, `YELLOW` $\rightarrow$ NetMirror, `BLUE` $\rightarrow$ Stremio, `EXPLORER/STEM1` $\rightarrow$ TV Connect).
+2. Open **Tailscale** (`com.tailscale.ipn`) on the STB and sign in once to join your private encrypted tailnet (`100.x.x.x`) for zero-port-forward global access.
+3. Launch the **Desktop Mirror Window** on your laptop (auto-discovers LAN `192.168.1.10` or Tailscale `100.x.x.x` from any network):
+   ```bash
+   python3 tools/laptop_mirror_client.py
+   ```
+   Or open the **Web Live Mirror Dashboard** in any browser:
+   * Local Wi-Fi: `http://<STB_IP>:8088/?token=<TOKEN>`
+   * Anywhere (Tailscale): `http://<TAILSCALE_IP>:8088/?token=<TOKEN>`
+   * Remote ADB over Tailscale: `adb connect <TAILSCALE_IP>:5555`
+4. **REST & Streaming Endpoints** (authenticate via `?token=<TOKEN>`, `X-API-Key: <TOKEN>`, or `Authorization: Bearer <TOKEN>`):
+   * `GET /api/ping` — unauthenticated liveness check
+   * `GET /api/health` — model, Wi-Fi IP, Tailscale IP, Accessibility state, active IME
+   * `GET /api/mirror.mjpeg?scale=2&q=65` — live multipart JPEG video stream (browser & desktop GUI)
+   * `GET /api/mirror.h264?size=1280x720&bitrate=2500000` — live hardware-encoded 30fps H.264 stream (`ffplay` / `mpv`)
+   * `GET /api/screen.jpg?scale=2&q=65` / `GET /api/screen` — single JPEG / PNG snapshot
+   * `GET /api/key?code=23` — send Android keycode (`3`=Home, `4`=Back, `19/20/21/22`=D-Pad, `23`=OK, `24/25`=Vol, `85`=Play/Pause)
+   * `GET /api/text?q=hello` — type text into focused TV input
+   * `GET /api/tap?x=960&y=540` / `GET /api/swipe?x1=...&y1=...&x2=...&y2=...` — touch/drag injection
+   * `GET /api/launch?pkg=com.abhinav.cinejoy` / `GET /api/open?url=https://...` / `GET /api/apps`
 
-### Additional Installed Stack
+### Additional Installed Stack & System Hardening
+* **Private DNS & Telemetry Hardening:** `private_dns_mode=hostname` set to `dns.adguard-dns.com`, `captive_portal_mode=0`, `wifi_sleep_policy=2`, `stay_on_while_plugged_in=3`, animations `0.25x`, and leftover non-TV AOSP services (`bips`, `svox.pico`, `musicfx`, `userdictionary`, `mtp`, `bluetoothmidiservice`) stripped alongside Jio bloat.
 * **On-Screen Keyboard:** LeanKeyboard (`org.liskovsoft.androidtv.rukeyboard/com.liskovsoft.leankeyboard.ime.LeanbackImeService`) set as active `default_input_method` with `show_ime_with_hard_keyboard=1`.
 * **Installer Permissions:** `package_verifier_enable=0`, `install_non_market_apps=1`, `REQUEST_INSTALL_PACKAGES` + `MANAGE_EXTERNAL_STORAGE` allowed for Aurora Store, plus **Shizuku** (`moe.shizuku.privileged.api`) running over ADB.
 * **Casting & Mirroring:** **Google Cast** (`com.google.android.apps.mediashell` updated to `v3.72.446070`), **Miracast Receiver** (`top.jast.miracastreceiver`), and **FCast Receiver** (`com.futo.fcast.receiver`).

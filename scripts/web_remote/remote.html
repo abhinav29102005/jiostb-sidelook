@@ -1,136 +1,364 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>Abhinav TV Connect API</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>JioSTB Live Mirror Gateway</title>
 <style>
-  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --accent:#58a6ff; --green:#95ff50; }
-  * { box-sizing:border-box; }
-  body { background:var(--bg); color:#f0f6fc; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; margin:0; padding:16px; display:flex; flex-direction:column; align-items:center; gap:14px; }
-  h2 { margin:4px 0 0; color:var(--accent); font-size:20px; }
-  .pill { font-size:12px; color:#8b949e; background:var(--card); border:1px solid var(--border); padding:4px 10px; border-radius:999px; }
-  .card { width:100%; max-width:380px; background:var(--card); border:1px solid var(--border); border-radius:16px; padding:14px; }
-  .grid { display:grid; grid-template-columns:repeat(3,72px); gap:12px; justify-content:center; margin:6px auto; }
-  .btn { background:#21262d; border:1px solid var(--border); color:#f0f6fc; border-radius:14px; height:48px; display:flex; align-items:center; justify-content:center; font-size:15px; font-weight:600; cursor:pointer; user-select:none; -webkit-tap-highlight-color:transparent; }
-  .btn:active { background:var(--accent); color:#0d1117; transform:scale(0.95); }
-  .dpad { width:72px; height:72px; border-radius:50%; font-size:22px; }
-  .ok { background:#1f6feb; border-color:var(--accent); font-size:18px; }
-  .row { display:flex; gap:8px; margin-top:8px; }
-  .row .btn { flex:1; }
-  .apps { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
-  .apps .btn { font-size:12px; height:40px; }
-  input { flex:1; min-width:0; padding:10px 12px; border-radius:10px; border:1px solid var(--border); background:#0d1117; color:#fff; font-size:14px; }
-  .screen-wrap img { width:100%; border-radius:10px; border:1px solid var(--border); margin-top:10px; cursor:crosshair; }
+  :root {
+    color-scheme: dark;
+    --bg: #080b12;
+    --card: #121726;
+    --border: rgba(255,255,255,.11);
+    --btn: #1c243b;
+    --btnHover: #26314f;
+    --accent: #3b82f6;
+    --accent2: #10b981;
+    --danger: #ef4444;
+    --txt: #f1f5f9;
+    --muted: #94a3b8;
+  }
+  * { box-sizing: border-box; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  body { margin: 0; background: var(--bg); color: var(--txt); padding: 14px; }
+  .layout {
+    max-width: 1380px; margin: 0 auto;
+    display: grid; grid-template-columns: 1fr; gap: 14px;
+    align-items: start;
+  }
+  @media (min-width: 960px) {
+    .layout { grid-template-columns: minmax(0, 1.55fr) 390px; }
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; padding: 14px;
+    box-shadow: 0 12px 32px rgba(0,0,0,.35);
+  }
+  .hdr { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .title { font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  .dot.on { background: var(--accent2); box-shadow: 0 0 10px var(--accent2); }
+  .sub { font-size: 12px; color: var(--muted); }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  button, select {
+    background: var(--btn); color: var(--txt); border: 1px solid var(--border);
+    border-radius: 10px; padding: 8px 12px; font-size: 13px; font-weight: 600;
+    cursor: pointer; touch-action: manipulation; transition: background .12s, transform .06s;
+  }
+  button:hover { background: var(--btnHover); }
+  button:active { transform: scale(.97); }
+  button.primary { background: var(--accent); border-color: transparent; }
+  button.active { background: var(--accent2); color: #04130d; border-color: transparent; }
+  button.danger { background: rgba(239,68,68,.2); color: #fecaca; border-color: rgba(239,68,68,.4); }
+  .screenWrap {
+    position: relative; width: 100%; aspect-ratio: 16/9;
+    background: #000; border-radius: 12px; overflow: hidden;
+    border: 1px solid var(--border); user-select: none; cursor: crosshair;
+  }
+  #tvScreen {
+    width: 100%; height: 100%; object-fit: contain; display: block;
+    pointer-events: none;
+  }
+  .overlayHint {
+    position: absolute; bottom: 8px; left: 8px; right: 8px;
+    display: flex; justify-content: space-between; align-items: center;
+    pointer-events: none; font-size: 11px; color: rgba(255,255,255,.78);
+    text-shadow: 0 1px 3px rgba(0,0,0,.9);
+  }
+  .pill {
+    background: rgba(8,11,18,.78); border: 1px solid rgba(255,255,255,.16);
+    padding: 3px 8px; border-radius: 999px; backdrop-filter: blur(6px);
+  }
+  .stack { display: flex; flex-direction: column; gap: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  input {
+    width: 100%; background: #0a0e1a; border: 1px solid var(--border);
+    color: var(--txt); padding: 9px 11px; border-radius: 10px; font-size: 13px;
+  }
+  .dpad {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+    max-width: 240px; margin: 6px auto;
+  }
+  .dpad button { height: 48px; font-size: 16px; border-radius: 12px; }
+  .okBtn { background: var(--accent); border-color: transparent; }
+  .apps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+  .apps button { padding: 9px 6px; font-size: 12px; }
+  code.tiny {
+    display: block; margin-top: 6px; padding: 7px 9px; border-radius: 8px;
+    background: #0a0e1a; border: 1px solid var(--border); color: #93c5fd;
+    font-size: 11px; word-break: break-all; user-select: all;
+  }
 </style>
 </head>
 <body>
-<h2>Abhinav TV Connect</h2>
-<div class="pill" id="stat">Checking API...</div>
+<div class="layout">
+  <div class="card">
+    <div class="hdr">
+      <div class="title">
+        <span class="dot" id="statusDot"></span>
+        <span>JioSTB Live Mirror Gateway</span>
+      </div>
+      <div class="sub" id="netInfo">Checking STB status...</div>
+    </div>
 
-<div class="card" id="authCard" style="display:none">
-  <div style="font-size:13px;margin-bottom:8px;color:#8b949e">Enter API Token (from /sdcard/tv_connect_token.txt)</div>
-  <div class="row" style="margin-top:0">
-    <input type="password" id="tok" placeholder="API Token">
-    <div class="btn" style="flex:0 0 80px;background:#238636" onclick="saveToken()">Save</div>
-  </div>
-</div>
+    <div class="toolbar">
+      <button id="streamBtn" class="active" onclick="toggleStream()">Live Mirror: ON</button>
+      <button id="kbdBtn" onclick="toggleKeyboardCapture()">Laptop Keyboard: OFF</button>
+      <select id="qualitySel" onchange="restartStreamIfOn()">
+        <option value="scale=2&q=65" selected>Fast 960x540 (Low Latency)</option>
+        <option value="scale=1&q=70">Full 1920x1080 (Crisp)</option>
+        <option value="scale=3&q=55">Eco 640x360 (Cellular/Slow Net)</option>
+      </select>
+      <button onclick="snapOnce()">Snap Now</button>
+    </div>
 
-<div class="card">
-  <div class="grid">
-    <div></div><div class="btn dpad" onclick="key(19)">&#9650;</div><div></div>
-    <div class="btn dpad" onclick="key(21)">&#9664;</div><div class="btn dpad ok" onclick="key(23)">OK</div><div class="btn dpad" onclick="key(22)">&#9654;</div>
-    <div></div><div class="btn dpad" onclick="key(20)">&#9660;</div><div></div>
-  </div>
-  <div class="row">
-    <div class="btn" onclick="key(4)">Back</div>
-    <div class="btn" onclick="key(3)">Home</div>
-    <div class="btn" onclick="key(85)">Play/Pause</div>
-  </div>
-  <div class="row">
-    <div class="btn" onclick="key(25)">Vol -</div>
-    <div class="btn" onclick="key(164)">Mute</div>
-    <div class="btn" onclick="key(24)">Vol +</div>
-    <div class="btn" onclick="key(26)">Power</div>
-  </div>
-</div>
+    <div class="screenWrap" id="screenBox" title="Click to Tap • Drag to Swipe • Scroll Wheel for Up/Down">
+      <img id="tvScreen" alt="TV Live Display">
+      <div class="overlayHint">
+        <span class="pill" id="coordsHint">Click = Tap • Drag = Swipe • Wheel = Scroll</span>
+        <span class="pill" id="modeHint">Keyboard Capture: OFF</span>
+      </div>
+    </div>
 
-<div class="card">
-  <div class="row" style="margin-top:0">
-    <input type="text" id="txt" placeholder="Type text to TV..." onkeydown="if(event.key==='Enter')sendText()">
-    <div class="btn" style="flex:0 0 70px" onclick="sendText()">Send</div>
+    <div class="sub" style="margin-top:8px">
+      Hardware 30fps H.264 stream for desktop <code>mpv</code>/<code>ffplay</code>/<code>laptop_mirror_client.py</code>:
+      <code class="tiny" id="h264Url">Set API token to reveal stream URL</code>
+    </div>
   </div>
-  <div class="row">
-    <input type="text" id="url" placeholder="Open URL (https://...)" onkeydown="if(event.key==='Enter')openUrl()">
-    <div class="btn" style="flex:0 0 70px" onclick="openUrl()">Open</div>
-  </div>
-</div>
 
-<div class="card">
-  <div class="apps">
-    <div class="btn" style="color:var(--green)" onclick="launch('com.abhinav.cinejoy')">Cinejoy</div>
-    <div class="btn" onclick="launch('org.smarttube.stable')">SmartTube</div>
-    <div class="btn" onclick="launch('app.netmirror.newtv')">NetMirror</div>
-    <div class="btn" onclick="launch('com.stremio.one')">Stremio</div>
-    <div class="btn" onclick="launch('com.aurora.store')">Aurora Store</div>
-    <div class="btn" onclick="launch('top.jast.miracastreceiver')">Miracast</div>
-    <div class="btn" onclick="launch('com.futo.fcast.receiver')">FCast</div>
-    <div class="btn" onclick="launch('com.tailscale.ipn')">Tailscale</div>
-    <div class="btn" onclick="launch('com.klevico.monet')">Home</div>
-  </div>
-</div>
+  <div class="stack">
+    <div class="card">
+      <div class="sub" style="margin-bottom:6px">API Token (stored in browser)</div>
+      <div class="row">
+        <input id="tok" type="password" placeholder="API token">
+        <button class="primary" style="flex:0 0 auto" onclick="saveTok()">Connect</button>
+      </div>
+    </div>
 
-<div class="card screen-wrap">
-  <div class="row" style="margin-top:0">
-    <div class="btn" onclick="refreshScreen()">Capture TV Screen (Tap image to click)</div>
-    <div class="btn" style="flex:0 0 80px" onclick="changeToken()">Token</div>
+    <div class="card">
+      <div class="row" style="margin-bottom:8px">
+        <button class="danger" onclick="k(26)">Power</button>
+        <button onclick="k(3)">Home</button>
+        <button onclick="k(4)">Back</button>
+        <button onclick="k(82)">Menu</button>
+      </div>
+      <div class="dpad">
+        <div></div><button onclick="k(19)">▲</button><div></div>
+        <button onclick="k(21)">◀</button><button class="okBtn" onclick="k(23)">OK</button><button onclick="k(22)">▶</button>
+        <div></div><button onclick="k(20)">▼</button><div></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button onclick="k(25)">Vol -</button>
+        <button onclick="k(164)">Mute</button>
+        <button onclick="k(24)">Vol +</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button onclick="k(89)">Rew</button>
+        <button onclick="k(85)">Play/Pause</button>
+        <button onclick="k(90)">FF</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="sub" style="margin-bottom:6px">Send Text to TV Focused Box</div>
+      <div class="row">
+        <input id="txt" placeholder="Type text..." onkeydown="if(event.key==='Enter')sendTxt()">
+        <button class="primary" style="flex:0 0 auto" onclick="sendTxt()">Type</button>
+        <button style="flex:0 0 auto" onclick="k(66)">Enter</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="sub" style="margin-bottom:8px">Quick Launch</div>
+      <div class="apps">
+        <button onclick="launch('com.abhinav.cinejoy')">Cinejoy</button>
+        <button onclick="launch('org.smarttube.stable')">SmartTube</button>
+        <button onclick="launch('app.netmirror.newtv')">NetMirror</button>
+        <button onclick="launch('com.stremio.one')">Stremio</button>
+        <button onclick="launch('com.phlox.tvwebbrowser')">TV Bro</button>
+        <button onclick="launch('com.aurora.store')">Aurora</button>
+        <button onclick="launch('com.tailscale.ipn')">Tailscale</button>
+        <button onclick="launch('top.jast.miracastreceiver')">Miracast</button>
+        <button onclick="launch('com.futo.fcast.receiver')">FCast</button>
+        <button onclick="launch('com.klevico.monet')">Projectivy</button>
+        <button onclick="launch('com.abhinav.tvconnect')">TV Connect</button>
+        <button onclick="launch('com.android.tv.settings')">Settings</button>
+      </div>
+    </div>
   </div>
-  <img id="scr" style="display:none" onclick="tapScreen(event)">
 </div>
 
 <script>
-const qs = new URLSearchParams(location.search);
-if (qs.get('token')) localStorage.setItem('tv_api_token', qs.get('token'));
-function getToken(){ return localStorage.getItem('tv_api_token') || ''; }
-function saveToken(){
-  const v = document.getElementById('tok').value.trim();
-  if (!v) return;
-  localStorage.setItem('tv_api_token', v);
-  document.getElementById('authCard').style.display = 'none';
+const p = new URLSearchParams(location.search);
+let token = p.get('token') || localStorage.getItem('tv_api_token') || '';
+if (p.get('token')) localStorage.setItem('tv_api_token', token);
+document.getElementById('tok').value = token;
+
+let streamOn = true;
+let kbdCapture = false;
+let dragStart = null;
+let dragMoved = false;
+let streamTimer = null;
+
+function saveTok() {
+  token = document.getElementById('tok').value.trim();
+  localStorage.setItem('tv_api_token', token);
   checkHealth();
+  if (streamOn) startStream();
 }
-function changeToken(){ document.getElementById('authCard').style.display = 'block'; }
-async function api(path){
+
+async function api(path) {
+  if (!token) return null;
   const sep = path.includes('?') ? '&' : '?';
-  const r = await fetch(path + sep + 'token=' + encodeURIComponent(getToken()));
-  if (r.status === 401) { document.getElementById('authCard').style.display = 'block'; throw new Error('401'); }
-  return r;
+  const r = await fetch(path + sep + 'token=' + encodeURIComponent(token));
+  return r.json();
 }
-async function checkHealth(){
+
+function k(code) { api('/api/key?code=' + code); }
+function launch(pkg) { api('/api/launch?pkg=' + encodeURIComponent(pkg)); }
+
+async function sendTxt() {
+  const el = document.getElementById('txt');
+  const v = el.value;
+  if (!v) return;
+  await api('/api/text?q=' + encodeURIComponent(v));
+  el.value = '';
+}
+
+function updateStreamURLHint() {
+  const box = document.getElementById('h264Url');
+  if (!token) {
+    box.textContent = 'Set API token to reveal stream URL';
+    return;
+  }
+  box.textContent = location.origin + '/api/mirror.h264?token=' + token;
+}
+
+function startStream() {
+  const img = document.getElementById('tvScreen');
+  if (!token) return;
+  const q = document.getElementById('qualitySel').value;
+  img.src = '/api/mirror.mjpeg?' + q + '&token=' + encodeURIComponent(token) + '&ts=' + Date.now();
+  updateStreamURLHint();
+}
+
+function stopStream() {
+  const img = document.getElementById('tvScreen');
+  img.removeAttribute('src');
+}
+
+function snapOnce() {
+  if (!token) return;
+  const img = document.getElementById('tvScreen');
+  const q = document.getElementById('qualitySel').value;
+  img.src = '/api/screen.jpg?' + q + '&token=' + encodeURIComponent(token) + '&ts=' + Date.now();
+}
+
+function toggleStream() {
+  streamOn = !streamOn;
+  const btn = document.getElementById('streamBtn');
+  btn.textContent = streamOn ? 'Live Mirror: ON' : 'Live Mirror: OFF';
+  btn.classList.toggle('active', streamOn);
+  if (streamOn) startStream();
+  else stopStream();
+}
+
+function restartStreamIfOn() {
+  if (streamOn) startStream();
+}
+
+function toggleKeyboardCapture() {
+  kbdCapture = !kbdCapture;
+  const btn = document.getElementById('kbdBtn');
+  btn.textContent = kbdCapture ? 'Laptop Keyboard: ON' : 'Laptop Keyboard: OFF';
+  btn.classList.toggle('active', kbdCapture);
+  document.getElementById('modeHint').textContent = kbdCapture
+    ? 'Keyboard Capture: ON (Esc=Back, Arrows=D-Pad, Type directly)'
+    : 'Keyboard Capture: OFF';
+  if (document.activeElement) document.activeElement.blur();
+}
+
+function boxToTV(ev) {
+  const box = document.getElementById('screenBox').getBoundingClientRect();
+  const x = Math.max(0, Math.min(1919, Math.round((ev.clientX - box.left) * 1920 / box.width)));
+  const y = Math.max(0, Math.min(1079, Math.round((ev.clientY - box.top) * 1080 / box.height)));
+  return { x, y };
+}
+
+const screenBox = document.getElementById('screenBox');
+screenBox.addEventListener('pointerdown', (ev) => {
+  dragStart = { x: ev.clientX, y: ev.clientY, tv: boxToTV(ev) };
+  dragMoved = false;
+});
+screenBox.addEventListener('pointermove', (ev) => {
+  if (!dragStart) return;
+  if (Math.hypot(ev.clientX - dragStart.x, ev.clientY - dragStart.y) > 16) dragMoved = true;
+});
+screenBox.addEventListener('pointerup', (ev) => {
+  if (!dragStart) return;
+  const end = boxToTV(ev);
+  if (dragMoved) {
+    document.getElementById('coordsHint').textContent = `Swipe (${dragStart.tv.x},${dragStart.tv.y}) -> (${end.x},${end.y})`;
+    api(`/api/swipe?x1=${dragStart.tv.x}&y1=${dragStart.tv.y}&x2=${end.x}&y2=${end.y}&ms=240`);
+  } else {
+    document.getElementById('coordsHint').textContent = `Tap (${end.x}, ${end.y})`;
+    api(`/api/tap?x=${end.x}&y=${end.y}`);
+  }
+  dragStart = null;
+});
+screenBox.addEventListener('wheel', (ev) => {
+  ev.preventDefault();
+  if (Math.abs(ev.deltaY) >= Math.abs(ev.deltaX)) k(ev.deltaY > 0 ? 20 : 19);
+  else k(ev.deltaX > 0 ? 22 : 21);
+}, { passive: false });
+
+const keyMap = {
+  ArrowUp: 19, ArrowDown: 20, ArrowLeft: 21, ArrowRight: 22,
+  Enter: 23, Escape: 4, Backspace: 67, Home: 3, PageUp: 92, PageDown: 93
+};
+window.addEventListener('keydown', (ev) => {
+  if (!kbdCapture) return;
+  const tag = (document.activeElement && document.activeElement.tagName) || '';
+  if (tag === 'INPUT' || tag === 'SELECT') return;
+  if (keyMap[ev.key]) {
+    ev.preventDefault();
+    k(keyMap[ev.key]);
+    return;
+  }
+  if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    ev.preventDefault();
+    api('/api/text?q=' + encodeURIComponent(ev.key));
+  }
+});
+
+document.getElementById('tvScreen').addEventListener('error', () => {
+  if (!streamOn || !token) return;
+  clearTimeout(streamTimer);
+  streamTimer = setTimeout(startStream, 1200);
+});
+
+async function checkHealth() {
+  const info = document.getElementById('netInfo');
+  const dot = document.getElementById('statusDot');
   try {
-    const r = await api('/api/health');
-    const j = await r.json();
-    document.getElementById('stat').textContent = j.ok ? ('Connected: ' + j.model + ' (' + j.wifi_ip + ')') : 'Error';
-  } catch(e) {
-    document.getElementById('stat').textContent = 'Auth Required';
+    const h = await api('/api/health');
+    if (h && h.ok) {
+      dot.classList.add('on');
+      info.textContent = `${h.model || h.device} • WiFi ${h.wifi_ip || '-'}` + (h.tailscale_ip ? ` • Tailscale ${h.tailscale_ip}` : ' • Tailscale: not signed in yet');
+    } else {
+      dot.classList.remove('on');
+      info.textContent = 'Enter valid API token to connect';
+    }
+  } catch (e) {
+    dot.classList.remove('on');
+    info.textContent = 'Disconnected';
   }
 }
-function key(c){ if (navigator.vibrate) navigator.vibrate(25); api('/api/key?code=' + c).catch(()=>{}); }
-function launch(p){ api('/api/launch?pkg=' + encodeURIComponent(p)).catch(()=>{}); }
-function sendText(){ const el = document.getElementById('txt'); if(!el.value)return; api('/api/text?q='+encodeURIComponent(el.value)).then(()=>el.value='').catch(()=>{}); }
-function openUrl(){ const el = document.getElementById('url'); if(!el.value)return; api('/api/open?url='+encodeURIComponent(el.value)).then(()=>el.value='').catch(()=>{}); }
-function refreshScreen(){
-  const img = document.getElementById('scr');
-  img.src = '/api/screen?token=' + encodeURIComponent(getToken()) + '&t=' + Date.now();
-  img.style.display = 'block';
-}
-function tapScreen(ev){
-  const img = ev.target, rect = img.getBoundingClientRect();
-  const x = Math.round((ev.clientX - rect.left) / rect.width * 1920);
-  const y = Math.round((ev.clientY - rect.top) / rect.height * 1080);
-  api('/api/tap?x=' + x + '&y=' + y).then(() => setTimeout(refreshScreen, 700)).catch(()=>{});
-}
+
+updateStreamURLHint();
 checkHealth();
+setInterval(checkHealth, 12000);
+if (token) startStream();
 </script>
 </body>
 </html>

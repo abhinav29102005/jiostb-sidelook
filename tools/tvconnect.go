@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image"
+	"image/jpeg"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -14,15 +20,18 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 var (
-	addr      = flag.String("addr", ":8088", "listen address")
-	tokenFile = flag.String("token-file", "/data/local/tmp/api_token.txt", "API token path")
-	uiFile    = flag.String("ui", "/data/local/tmp/remote.html", "HTML dashboard path")
-	apiToken  string
-	screenMu  sync.Mutex
+	addr       = flag.String("addr", ":8088", "listen address")
+	tokenFile  = flag.String("token-file", "/data/local/tmp/api_token.txt", "API token path")
+	uiFile     = flag.String("ui", "/data/local/tmp/remote.html", "HTML dashboard path")
+	apiToken   string
+	screenMu   sync.Mutex
+	h264Mu     sync.Mutex
+	inputQueue = make(chan []string, 256)
 )
 
 func loadOrCreateToken(path string) string {
@@ -122,9 +131,195 @@ func sanitizePkg(s string) string {
 	return b.String()
 }
 
+func startInputWorker() {
+	go func() {
+		for args := range inputQueue {
+			if len(args) == 0 {
+				continue
+			}
+			_ = exec.Command("/system/bin/input", args...).Run()
+		}
+	}()
+}
+
+func enqueueInput(args ...string) {
+	select {
+	case inputQueue <- args:
+	default:
+		// Drop stale burst input rather than blocking HTTP handler.
+	}
+}
+
+var rawFrameBuf []byte
+
+func captureJPEG(scale, quality int) ([]byte, error) {
+	if scale < 1 || scale > 4 {
+		scale = 2
+	}
+	if quality < 20 || quality > 95 {
+		quality = 65
+	}
+	const tmpRaw = "/data/local/tmp/_tvconnect_frame.raw"
+
+	screenMu.Lock()
+	capCtx, capCancel := context.WithTimeout(context.Background(), 4*time.Second)
+	err := exec.CommandContext(capCtx, "/system/bin/screencap", tmpRaw).Run()
+	capCancel()
+	if err != nil {
+		screenMu.Unlock()
+		return nil, fmt.Errorf("screencap failed: %w", err)
+	}
+	f, err := os.Open(tmpRaw)
+	if err != nil {
+		screenMu.Unlock()
+		return nil, fmt.Errorf("open frame failed: %w", err)
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		screenMu.Unlock()
+		return nil, fmt.Errorf("stat frame failed: %w", err)
+	}
+	n := int(st.Size())
+	if n < 16 {
+		_ = f.Close()
+		screenMu.Unlock()
+		return nil, fmt.Errorf("screencap file too short (%d)", n)
+	}
+	if cap(rawFrameBuf) < n {
+		rawFrameBuf = make([]byte, n)
+	}
+	raw := rawFrameBuf[:n]
+	_, rerr := io.ReadFull(f, raw)
+	_ = f.Close()
+	if rerr != nil {
+		screenMu.Unlock()
+		return nil, fmt.Errorf("read frame failed: %w", rerr)
+	}
+
+	w := int(binary.LittleEndian.Uint32(raw[0:4]))
+	h := int(binary.LittleEndian.Uint32(raw[4:8]))
+	if w <= 0 || h <= 0 || w > 4096 || h > 4096 {
+		screenMu.Unlock()
+		return nil, fmt.Errorf("invalid frame dimensions %dx%d", w, h)
+	}
+	expectedPixels := w * h * 4
+	headerLen := len(raw) - expectedPixels
+	if headerLen < 12 || headerLen > 64 {
+		screenMu.Unlock()
+		return nil, fmt.Errorf("unexpected raw size %d for %dx%d", len(raw), w, h)
+	}
+	pix := raw[headerLen:]
+
+	outW := w / scale
+	outH := h / scale
+	dst := image.NewRGBA(image.Rect(0, 0, outW, outH))
+	srcStride := w * 4
+	dstStride := dst.Stride
+	for dy := 0; dy < outH; dy++ {
+		sy := dy * scale * srcStride
+		dp := dy * dstStride
+		for dx := 0; dx < outW; dx++ {
+			sp := sy + dx*scale*4
+			dst.Pix[dp+0] = pix[sp+0]
+			dst.Pix[dp+1] = pix[sp+1]
+			dst.Pix[dp+2] = pix[sp+2]
+			dst.Pix[dp+3] = 255
+			dp += 4
+		}
+	}
+	screenMu.Unlock()
+
+	var buf bytes.Buffer
+	buf.Grow(outW * outH / 8)
+	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: quality}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+type mirrorHub struct {
+	mu      sync.Mutex
+	subs    map[chan []byte]struct{}
+	running bool
+	scale   atomic.Int32
+	quality atomic.Int32
+}
+
+func newMirrorHub() *mirrorHub {
+	h := &mirrorHub{subs: make(map[chan []byte]struct{})}
+	h.scale.Store(2)
+	h.quality.Store(65)
+	return h
+}
+
+func (h *mirrorHub) subscribe(scale, quality int) chan []byte {
+	if scale >= 1 && scale <= 4 {
+		h.scale.Store(int32(scale))
+	}
+	if quality >= 20 && quality <= 95 {
+		h.quality.Store(int32(quality))
+	}
+	ch := make(chan []byte, 2)
+	h.mu.Lock()
+	h.subs[ch] = struct{}{}
+	needStart := !h.running
+	h.running = true
+	h.mu.Unlock()
+	if needStart {
+		go h.loop()
+	}
+	return ch
+}
+
+func (h *mirrorHub) unsubscribe(ch chan []byte) {
+	h.mu.Lock()
+	delete(h.subs, ch)
+	h.mu.Unlock()
+	close(ch)
+}
+
+func (h *mirrorHub) loop() {
+	for {
+		h.mu.Lock()
+		n := len(h.subs)
+		if n == 0 {
+			h.running = false
+			h.mu.Unlock()
+			return
+		}
+		h.mu.Unlock()
+
+		frame, err := captureJPEG(int(h.scale.Load()), int(h.quality.Load()))
+		if err != nil {
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+		h.mu.Lock()
+		for ch := range h.subs {
+			select {
+			case ch <- frame:
+			default:
+				// Drop old frame so viewer stays real-time.
+				select {
+				case <-ch:
+				default:
+				}
+				select {
+				case ch <- frame:
+				default:
+				}
+			}
+		}
+		h.mu.Unlock()
+	}
+}
+
 func main() {
 	flag.Parse()
 	apiToken = loadOrCreateToken(*tokenFile)
+	startInputWorker()
+	hub := newMirrorHub()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -148,15 +343,19 @@ func main() {
 
 	mux.HandleFunc("/api/health", withAuth(func(w http.ResponseWriter, r *http.Request) {
 		imeOut, _ := exec.Command("/system/bin/settings", "get", "secure", "default_input_method").Output()
+		accOut, _ := exec.Command("/system/bin/settings", "get", "secure", "enabled_accessibility_services").Output()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":           true,
-			"model":        runProp("ro.product.model"),
-			"device":       runProp("ro.product.device"),
-			"wifi_ip":      getIfaceIP("wlan", "eth"),
-			"tailscale_ip": getIfaceIP("tun"),
-			"adb_port":     5555,
-			"ime":          strings.TrimSpace(string(imeOut)),
-			"time":         time.Now().Format(time.RFC3339),
+			"ok":            true,
+			"model":         runProp("ro.product.model"),
+			"device":        runProp("ro.product.device"),
+			"wifi_ip":       getIfaceIP("wlan", "eth"),
+			"tailscale_ip":  getIfaceIP("tun"),
+			"adb_port":      5555,
+			"screen_w":      1920,
+			"screen_h":      1080,
+			"ime":           strings.TrimSpace(string(imeOut)),
+			"accessibility": strings.TrimSpace(string(accOut)),
+			"time":          time.Now().Format(time.RFC3339),
 		})
 	}))
 
@@ -170,10 +369,13 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid key code"})
 			return
 		}
-		go func() {
-			_ = exec.Command("/system/bin/input", "keyevent", strconv.Itoa(code)).Run()
-		}()
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": code})
+		long := r.URL.Query().Get("long") == "1"
+		if long {
+			enqueueInput("keyevent", "--longpress", strconv.Itoa(code))
+		} else {
+			enqueueInput("keyevent", strconv.Itoa(code))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": code, "long": long})
 	}))
 
 	mux.HandleFunc("/api/text", withAuth(func(w http.ResponseWriter, r *http.Request) {
@@ -183,9 +385,7 @@ func main() {
 			return
 		}
 		escaped := strings.ReplaceAll(q, " ", "%s")
-		go func() {
-			_ = exec.Command("/system/bin/input", "text", escaped).Run()
-		}()
+		enqueueInput("text", escaped)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}))
 
@@ -196,9 +396,7 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid coordinates"})
 			return
 		}
-		go func() {
-			_ = exec.Command("/system/bin/input", "tap", strconv.Itoa(x), strconv.Itoa(y)).Run()
-		}()
+		enqueueInput("tap", strconv.Itoa(x), strconv.Itoa(y))
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "x": x, "y": y})
 	}))
 
@@ -215,9 +413,7 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid swipe coordinates"})
 			return
 		}
-		go func() {
-			_ = exec.Command("/system/bin/input", "swipe", strconv.Itoa(x1), strconv.Itoa(y1), strconv.Itoa(x2), strconv.Itoa(y2), ms).Run()
-		}()
+		enqueueInput("swipe", strconv.Itoa(x1), strconv.Itoa(y1), strconv.Itoa(x2), strconv.Itoa(y2), ms)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}))
 
@@ -273,6 +469,139 @@ func main() {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		_, _ = w.Write(out)
+	}))
+
+	mux.HandleFunc("/api/screen.jpg", withAuth(func(w http.ResponseWriter, r *http.Request) {
+		scale, _ := strconv.Atoi(r.URL.Query().Get("scale"))
+		quality, _ := strconv.Atoi(r.URL.Query().Get("q"))
+		jpg, err := captureJPEG(scale, quality)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		_, _ = w.Write(jpg)
+	}))
+
+	mux.HandleFunc("/api/mirror.mjpeg", withAuth(func(w http.ResponseWriter, r *http.Request) {
+		scale, _ := strconv.Atoi(r.URL.Query().Get("scale"))
+		quality, _ := strconv.Atoi(r.URL.Query().Get("q"))
+		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Connection", "close")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		flusher, _ := w.(http.Flusher)
+		ch := hub.subscribe(scale, quality)
+		defer hub.unsubscribe(ch)
+
+		ctx := r.Context()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case frame, ok := <-ch:
+				if !ok {
+					return
+				}
+				hdr := fmt.Sprintf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(frame))
+				if _, err := io.WriteString(w, hdr); err != nil {
+					return
+				}
+				if _, err := w.Write(frame); err != nil {
+					return
+				}
+				if _, err := io.WriteString(w, "\r\n"); err != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+		}
+	}))
+
+	mux.HandleFunc("/api/mirror.h264", withAuth(func(w http.ResponseWriter, r *http.Request) {
+		h264Mu.Lock()
+		defer h264Mu.Unlock()
+		size := r.URL.Query().Get("size")
+		switch size {
+		case "960x540", "1280x720", "1920x1080":
+		default:
+			size = "1280x720"
+		}
+		br, err := strconv.Atoi(r.URL.Query().Get("bitrate"))
+		if err != nil || br < 500000 || br > 12000000 {
+			br = 2500000
+		}
+		bitrate := strconv.Itoa(br)
+		cmd := exec.Command(
+			"/system/bin/screenrecord",
+			"--output-format=h264",
+			"--size", size,
+			"--bit-rate", bitrate,
+			"-",
+		)
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if err := cmd.Start(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+
+		waitDone := make(chan error, 1)
+		go func() {
+			waitDone <- cmd.Wait()
+		}()
+		ctxDone := make(chan struct{})
+		go func() {
+			select {
+			case <-r.Context().Done():
+				if cmd.Process != nil {
+					_ = cmd.Process.Signal(os.Interrupt)
+				}
+			case <-ctxDone:
+			}
+		}()
+		defer func() {
+			close(ctxDone)
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(os.Interrupt)
+			}
+			select {
+			case <-waitDone:
+			case <-time.After(1500 * time.Millisecond):
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				<-waitDone
+			}
+		}()
+		w.Header().Set("Content-Type", "video/H264")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		flusher, _ := w.(http.Flusher)
+		buf := make([]byte, 32*1024)
+		for {
+			n, rerr := stdout.Read(buf)
+			if n > 0 {
+				if _, werr := w.Write(buf[:n]); werr != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
 	}))
 
 	log.Printf("tvconnect listening on %s", *addr)
