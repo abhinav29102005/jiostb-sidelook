@@ -121,32 +121,60 @@ def probe_working_url(candidates, token):
     return None, None
 
 
+RES_PRESETS = {
+    "720p HD": (2, 80, "720p"),
+    "1080p Full HD": (1, 84, "1080p"),
+    "540p Smooth": (3, 72, "540p"),
+    "360p Eco": (4, 62, "360p"),
+}
+SCALE_TO_LABEL = {v[0]: k for k, v in RES_PRESETS.items()}
+
+
 class MirrorClientApp:
     def __init__(self, root, base_url, token, scale):
         self.root = root
         self.base_url = base_url.rstrip("/")
         self.token = token
-        self.scale = scale
-        self.quality = 65
+        self.scale = scale if scale in SCALE_TO_LABEL else 2
+        self.quality = RES_PRESETS[SCALE_TO_LABEL[self.scale]][1]
+        self.res_tag = RES_PRESETS[SCALE_TO_LABEL[self.scale]][2]
 
         self.root.title(f"JioSTB Live Mirror — {self.base_url}")
-        self.root.geometry("1120x700")
+        self.root.geometry("1280x780")
         self.root.configure(bg="#080b12")
 
-        self.frame_queue = queue.Queue(maxsize=2)
+        self.raw_queue = queue.Queue(maxsize=2)
+        self.decoded_queue = queue.Queue(maxsize=2)
         self.stop_event = threading.Event()
         self.stream_gen = 0
         self.photo_ref = None
         self.img_item_id = None
-        self.img_rect = (0, 0, 960, 540)
+        self.img_rect = (0, 0, 1280, 720)
+        self.canvas_wh = (1280, 720)
+        self.video_wh = (1280, 720)
         self.drag_start = None
         self.direct_kbd = tk.BooleanVar(value=True)
+        self.stb_cursor_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value=f"Connected: {self.base_url}")
 
+        self.fps_count = 0
+        self.fps_t0 = time.time()
+        self.cur_fps = 0.0
+        self.last_cursor_sync = 0.0
+        self.last_cursor_tv = (960, 540)
+
+        self.cursor_shadow_id = None
+        self.cursor_poly_id = None
+        self.drag_line_id = None
+        self.ripple_id = None
+        self.hud_bg_id = None
+        self.hud_txt_id = None
+
         self._build_ui()
-        self._send_api("/api/start_mirror")
+        self._send_api(f"/api/start_mirror?scale={self.scale}&res={self.res_tag}&q={self.quality}")
         self._start_stream_thread()
-        self.root.after(15, self._poll_frames)
+        self._start_decode_thread()
+        self.root.after(8, self._poll_frames)
         self.root.after(200, self._refresh_health_bg)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -154,14 +182,14 @@ class MirrorClientApp:
         top = tk.Frame(self.root, bg="#121726", padx=8, pady=6)
         top.pack(fill=tk.X)
 
-        self.host_entry = tk.Entry(top, width=26, bg="#0a0e1a", fg="#f1f5f9", insertbackground="#f1f5f9")
+        self.host_entry = tk.Entry(top, width=25, bg="#0a0e1a", fg="#f1f5f9", insertbackground="#f1f5f9")
         self.host_entry.insert(0, self.base_url)
         self.host_entry.pack(side=tk.LEFT, padx=(0, 6))
 
         tk.Button(top, text="Reconnect", command=self._reconnect, bg="#3b82f6", fg="white", relief=tk.FLAT).pack(side=tk.LEFT, padx=3)
 
-        self.scale_var = tk.StringVar(value=str(self.scale))
-        q_menu = ttk.Combobox(top, textvariable=self.scale_var, values=["1", "2", "3"], width=3, state="readonly")
+        self.res_var = tk.StringVar(value=SCALE_TO_LABEL.get(self.scale, "720p HD"))
+        q_menu = ttk.Combobox(top, textvariable=self.res_var, values=list(RES_PRESETS.keys()), width=14, state="readonly")
         q_menu.pack(side=tk.LEFT, padx=4)
         q_menu.bind("<<ComboboxSelected>>", lambda _e: self._change_scale())
 
@@ -183,7 +211,7 @@ class MirrorClientApp:
 
         if shutil.which("ffplay"):
             tk.Button(
-                top, text="30fps H264", command=self._open_ffplay,
+                top, text="H264", command=self._open_ffplay,
                 bg="#10b981", fg="#04130d", relief=tk.FLAT, padx=7
             ).pack(side=tk.LEFT, padx=3)
 
@@ -191,29 +219,55 @@ class MirrorClientApp:
         bar2.pack(fill=tk.X)
 
         tk.Checkbutton(
-            bar2, text="Direct Laptop Keyboard (Arrows/Enter/Esc/Typing)",
+            bar2, text="Direct Keyboard",
             variable=self.direct_kbd, bg="#0e1320", fg="#93c5fd",
             selectcolor="#1c243b", activebackground="#0e1320"
         ).pack(side=tk.LEFT)
 
-        tk.Label(bar2, text="  Send Text:", bg="#0e1320", fg="#94a3b8").pack(side=tk.LEFT, padx=(12, 4))
-        self.text_entry = tk.Entry(bar2, width=28, bg="#0a0e1a", fg="#f1f5f9", insertbackground="#f1f5f9")
+        tk.Checkbutton(
+            bar2, text="TV Cursor",
+            variable=self.stb_cursor_var, command=self._toggle_stb_cursor,
+            bg="#0e1320", fg="#6ee7b7", selectcolor="#1c243b", activebackground="#0e1320"
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
+        tk.Label(bar2, text="  Send Text:", bg="#0e1320", fg="#94a3b8").pack(side=tk.LEFT, padx=(10, 4))
+        self.text_entry = tk.Entry(bar2, width=26, bg="#0a0e1a", fg="#f1f5f9", insertbackground="#f1f5f9")
         self.text_entry.pack(side=tk.LEFT, padx=3)
         self.text_entry.bind("<Return>", lambda _e: self._send_text_box())
         tk.Button(bar2, text="Send", command=self._send_text_box, bg="#1c243b", fg="#f1f5f9", relief=tk.FLAT).pack(side=tk.LEFT, padx=2)
 
         tk.Label(bar2, textvariable=self.status_var, bg="#0e1320", fg="#94a3b8", anchor=tk.E).pack(side=tk.RIGHT, fill=tk.X, expand=True)
 
-        self.canvas = tk.Canvas(self.root, bg="#000000", highlightthickness=0, cursor="crosshair")
+        self.canvas = tk.Canvas(self.root, bg="#000000", highlightthickness=0, cursor="arrow")
         self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
 
+        # Layered canvas items: tv_img -> drag_line -> ripple -> cursor_shadow -> cursor_poly -> hud
+        self.drag_line_id = self.canvas.create_line(0, 0, 0, 0, fill="#60a5fa", width=2.5, dash=(5, 4), state=tk.HIDDEN, tags=("cursor_layer",))
+        self.ripple_id = self.canvas.create_oval(0, 0, 0, 0, outline="#60a5fa", width=2.5, state=tk.HIDDEN, tags=("cursor_layer",))
+        self.cursor_shadow_id = self.canvas.create_polygon(0, 0, fill="#020617", outline="", state=tk.HIDDEN, tags=("cursor_layer",))
+        self.cursor_poly_id = self.canvas.create_polygon(0, 0, fill="#ffffff", outline="#0f172a", width=1.8, state=tk.HIDDEN, tags=("cursor_layer",))
+        self.hud_bg_id = self.canvas.create_rectangle(10, 10, 260, 34, fill="#0b101b", outline="#334155", width=1, tags=("hud_layer",))
+        self.hud_txt_id = self.canvas.create_text(20, 22, anchor=tk.W, text="Connecting HD stream...", fill="#e2e8f0", font=("Sans", 10, "bold"), tags=("hud_layer",))
+
+        self.canvas.bind("<Motion>", self._on_mouse_move)
+        self.canvas.bind("<Leave>", self._on_mouse_leave)
         self.canvas.bind("<ButtonPress-1>", self._on_mouse_down)
+        self.canvas.bind("<B1-Motion>", self._on_mouse_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_mouse_up)
+        self.canvas.bind("<Button-2>", lambda _e: self._send_api("/api/key?code=3"))
         self.canvas.bind("<Button-3>", lambda _e: self._send_api("/api/key?code=4"))
         self.canvas.bind("<Button-4>", lambda _e: self._send_api("/api/key?code=19"))
         self.canvas.bind("<Button-5>", lambda _e: self._send_api("/api/key?code=20"))
         self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
         self.root.bind("<KeyPress>", self._on_key_press)
+
+    def _on_canvas_resize(self, ev):
+        self.canvas_wh = (max(320, ev.width), max(180, ev.height))
+
+    def _toggle_stb_cursor(self):
+        en = 1 if self.stb_cursor_var.get() else 0
+        self._send_api(f"/api/cursor?enabled={en}&visible={en}")
 
     def _set_status(self, text):
         if not self.stop_event.is_set():
@@ -271,38 +325,107 @@ class MirrorClientApp:
         self.canvas.focus_set()
 
     def _change_scale(self):
-        self.scale = int(self.scale_var.get())
+        preset = RES_PRESETS.get(self.res_var.get(), (2, 80, "720p"))
+        self.scale, self.quality, self.res_tag = preset
         self.stream_gen += 1
+        self._send_api(f"/api/start_mirror?scale={self.scale}&res={self.res_tag}&q={self.quality}")
         self._refresh_health_bg()
         self.canvas.focus_set()
 
     def _open_ffplay(self):
-        url = f"{self.base_url}/api/mirror.h264?size=1280x720&bitrate=2500000&token={urllib.parse.quote(self.token)}"
+        url = f"{self.base_url}/api/mirror.h264?size=1280x720&bitrate=3500000&token={urllib.parse.quote(self.token)}"
         subprocess.Popen(["ffplay", "-fflags", "nobuffer", "-flags", "low_delay", "-framedrop", "-f", "h264", url])
 
     def _canvas_to_tv(self, cx, cy):
         rx, ry, rw, rh = self.img_rect
         if rw <= 0 or rh <= 0:
-            return 960, 540
+            return 960, 540, False
+        inside = (rx <= cx <= rx + rw) and (ry <= cy <= ry + rh)
         nx = max(0, min(1919, int((cx - rx) * 1920 / rw)))
         ny = max(0, min(1079, int((cy - ry) * 1080 / rh)))
-        return nx, ny
+        return nx, ny, inside
+
+    def _draw_cursor_at(self, cx, cy, pressed=False):
+        s = 0.86 if pressed else 1.0
+        pts = [
+            (0, 0), (0, 20), (5, 15), (9, 23), (12, 21.5), (8, 13.5), (15, 13.5)
+        ]
+        coords = []
+        sh_coords = []
+        for px, py in pts:
+            coords.extend([cx + px * s, cy + py * s])
+            sh_coords.extend([cx + px * s + 1.5, cy + py * s + 2.0])
+        self.canvas.coords(self.cursor_shadow_id, *sh_coords)
+        self.canvas.coords(self.cursor_poly_id, *coords)
+        self.canvas.itemconfig(self.cursor_shadow_id, state=tk.NORMAL)
+        self.canvas.itemconfig(self.cursor_poly_id, state=tk.NORMAL)
+        self.canvas.tag_raise("cursor_layer")
+        self.canvas.tag_raise("hud_layer")
+
+    def _show_ripple(self, cx, cy):
+        self.canvas.coords(self.ripple_id, cx - 10, cy - 10, cx + 10, cy + 10)
+        self.canvas.itemconfig(self.ripple_id, state=tk.NORMAL)
+        self.root.after(180, lambda: self.canvas.itemconfig(self.ripple_id, state=tk.HIDDEN))
+
+    def _sync_stb_cursor(self, tx, ty, visible):
+        if not self.stb_cursor_var.get():
+            return
+        now = time.time()
+        if visible and (now - self.last_cursor_sync) < 0.032:
+            return
+        self.last_cursor_sync = now
+        self.last_cursor_tv = (tx, ty)
+        self._send_api(f"/api/cursor?x={tx}&y={ty}&visible={1 if visible else 0}")
+
+    def _on_mouse_move(self, ev):
+        tx, ty, inside = self._canvas_to_tv(ev.x, ev.y)
+        if inside:
+            self.canvas.configure(cursor="none")
+            self._draw_cursor_at(ev.x, ev.y, pressed=bool(self.drag_start))
+            self._sync_stb_cursor(tx, ty, True)
+        else:
+            self.canvas.configure(cursor="arrow")
+            self.canvas.itemconfig(self.cursor_shadow_id, state=tk.HIDDEN)
+            self.canvas.itemconfig(self.cursor_poly_id, state=tk.HIDDEN)
+
+    def _on_mouse_leave(self, _ev):
+        self.canvas.configure(cursor="arrow")
+        self.canvas.itemconfig(self.cursor_shadow_id, state=tk.HIDDEN)
+        self.canvas.itemconfig(self.cursor_poly_id, state=tk.HIDDEN)
+        self.canvas.itemconfig(self.drag_line_id, state=tk.HIDDEN)
+        self._sync_stb_cursor(self.last_cursor_tv[0], self.last_cursor_tv[1], False)
 
     def _on_mouse_down(self, ev):
         self.canvas.focus_set()
         self.drag_start = (ev.x, ev.y)
+        self._draw_cursor_at(ev.x, ev.y, pressed=True)
+
+    def _on_mouse_drag(self, ev):
+        if not self.drag_start:
+            return
+        x0, y0 = self.drag_start
+        if abs(ev.x - x0) + abs(ev.y - y0) > 14:
+            self.canvas.coords(self.drag_line_id, x0, y0, ev.x, ev.y)
+            self.canvas.itemconfig(self.drag_line_id, state=tk.NORMAL)
+        self._draw_cursor_at(ev.x, ev.y, pressed=True)
+        tx, ty, inside = self._canvas_to_tv(ev.x, ev.y)
+        if inside:
+            self._sync_stb_cursor(tx, ty, True)
 
     def _on_mouse_up(self, ev):
+        self.canvas.itemconfig(self.drag_line_id, state=tk.HIDDEN)
         if not self.drag_start:
             return
         x0, y0 = self.drag_start
         self.drag_start = None
-        if abs(ev.x - x0) + abs(ev.y - y0) > 18:
-            tx1, ty1 = self._canvas_to_tv(x0, y0)
-            tx2, ty2 = self._canvas_to_tv(ev.x, ev.y)
-            self._send_api(f"/api/swipe?x1={tx1}&y1={ty1}&x2={tx2}&y2={ty2}&ms=240")
+        self._draw_cursor_at(ev.x, ev.y, pressed=False)
+        self._show_ripple(ev.x, ev.y)
+        if abs(ev.x - x0) + abs(ev.y - y0) > 14:
+            tx1, ty1, _ = self._canvas_to_tv(x0, y0)
+            tx2, ty2, _ = self._canvas_to_tv(ev.x, ev.y)
+            self._send_api(f"/api/swipe?x1={tx1}&y1={ty1}&x2={tx2}&y2={ty2}&ms=220")
         else:
-            tx, ty = self._canvas_to_tv(ev.x, ev.y)
+            tx, ty, _ = self._canvas_to_tv(ev.x, ev.y)
             self._send_api(f"/api/tap?x={tx}&y={ty}")
 
     def _on_mouse_wheel(self, ev):
@@ -332,15 +455,16 @@ class MirrorClientApp:
         def loop():
             while not self.stop_event.is_set():
                 gen = self.stream_gen
-                url = f"{self.base_url}/api/mirror.mjpeg?scale={self.scale}&q={self.quality}&token={urllib.parse.quote(self.token)}"
+                url = f"{self.base_url}/api/mirror.mjpeg?res={self.res_tag}&scale={self.scale}&q={self.quality}&token={urllib.parse.quote(self.token)}"
                 try:
                     with urllib.request.urlopen(url, timeout=8.0) as resp:
                         buf = bytearray()
                         while not self.stop_event.is_set() and gen == self.stream_gen:
-                            chunk = resp.read(16384)
+                            chunk = resp.read(32768)
                             if not chunk:
                                 break
                             buf.extend(chunk)
+                            newest = None
                             while True:
                                 soi = buf.find(b"\xff\xd8")
                                 if soi < 0:
@@ -352,48 +476,93 @@ class MirrorClientApp:
                                     if soi > 0:
                                         del buf[:soi]
                                     break
-                                jpg = bytes(buf[soi : eoi + 2])
+                                newest = bytes(buf[soi : eoi + 2])
                                 del buf[: eoi + 2]
-                                if self.frame_queue.full():
+                            if newest is not None:
+                                if self.raw_queue.full():
                                     try:
-                                        self.frame_queue.get_nowait()
+                                        self.raw_queue.get_nowait()
                                     except queue.Empty:
                                         pass
-                                self.frame_queue.put(jpg)
+                                self.raw_queue.put(newest)
                 except Exception:
-                    time.sleep(0.8)
+                    time.sleep(0.35)
         threading.Thread(target=loop, daemon=True).start()
+
+    def _start_decode_thread(self):
+        def worker():
+            while not self.stop_event.is_set():
+                try:
+                    jpg = self.raw_queue.get(timeout=0.25)
+                except queue.Empty:
+                    continue
+                while not self.raw_queue.empty():
+                    try:
+                        jpg = self.raw_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                try:
+                    cw, ch = self.canvas_wh
+                    img = Image.open(io.BytesIO(jpg))
+                    iw, ih = img.size
+                    ratio = min(cw / iw, ch / ih)
+                    nw, nh = max(1, int(iw * ratio)), max(1, int(ih * ratio))
+                    rx = (cw - nw) // 2
+                    ry = (ch - nh) // 2
+                    if nw != iw or nh != ih:
+                        resized = img.resize((nw, nh), Image.Resampling.BILINEAR)
+                    else:
+                        resized = img
+                    if self.decoded_queue.full():
+                        try:
+                            self.decoded_queue.get_nowait()
+                        except queue.Empty:
+                            pass
+                    self.decoded_queue.put((resized, (rx, ry, nw, nh), (iw, ih)))
+                except Exception:
+                    pass
+        threading.Thread(target=worker, daemon=True).start()
 
     def _poll_frames(self):
         if self.stop_event.is_set():
             return
         latest = None
-        while not self.frame_queue.empty():
+        while not self.decoded_queue.empty():
             try:
-                latest = self.frame_queue.get_nowait()
+                latest = self.decoded_queue.get_nowait()
             except queue.Empty:
                 break
         if latest is not None:
             try:
-                cw = max(320, self.canvas.winfo_width())
-                ch = max(180, self.canvas.winfo_height())
-                img = Image.open(io.BytesIO(latest))
-                iw, ih = img.size
-                ratio = min(cw / iw, ch / ih)
-                nw, nh = max(1, int(iw * ratio)), max(1, int(ih * ratio))
-                rx = (cw - nw) // 2
-                ry = (ch - nh) // 2
-                self.img_rect = (rx, ry, nw, nh)
-                resized = img.resize((nw, nh), Image.Resampling.BILINEAR)
+                resized, rect, vwh = latest
+                self.img_rect = rect
+                self.video_wh = vwh
+                rx, ry, _nw, _nh = rect
                 self.photo_ref = ImageTk.PhotoImage(resized)
                 if self.img_item_id is None:
-                    self.img_item_id = self.canvas.create_image(rx, ry, anchor=tk.NW, image=self.photo_ref)
+                    self.img_item_id = self.canvas.create_image(rx, ry, anchor=tk.NW, image=self.photo_ref, tags=("tv_img",))
                 else:
                     self.canvas.coords(self.img_item_id, rx, ry)
                     self.canvas.itemconfig(self.img_item_id, image=self.photo_ref)
+                self.canvas.tag_lower(self.img_item_id)
+                self.canvas.tag_raise("cursor_layer")
+                self.canvas.tag_raise("hud_layer")
+
+                self.fps_count += 1
+                now = time.time()
+                if now - self.fps_t0 >= 0.8:
+                    self.cur_fps = self.fps_count / (now - self.fps_t0)
+                    self.fps_count = 0
+                    self.fps_t0 = now
+                badge = "FHD" if vwh[0] >= 1920 else "HD" if vwh[0] >= 1280 else "SD"
+                txt = f"LIVE {badge} {vwh[0]}x{vwh[1]} • {self.cur_fps:.1f} fps | Cursor {self.last_cursor_tv[0]},{self.last_cursor_tv[1]}"
+                self.canvas.itemconfig(self.hud_txt_id, text=txt)
+                bbox = self.canvas.bbox(self.hud_txt_id)
+                if bbox:
+                    self.canvas.coords(self.hud_bg_id, bbox[0] - 8, bbox[1] - 4, bbox[2] + 8, bbox[3] + 4)
             except Exception:
                 pass
-        self.root.after(15, self._poll_frames)
+        self.root.after(8, self._poll_frames)
 
     def _on_close(self):
         self.stop_event.set()
@@ -404,7 +573,7 @@ def main():
     ap = argparse.ArgumentParser(description="JioSTB Live Mirror & Control Desktop Client")
     ap.add_argument("--host", default="", help="STB IP/URL (default: auto-discover LAN or Tailscale)")
     ap.add_argument("--token", default="", help="API token")
-    ap.add_argument("--scale", type=int, default=2, choices=[1, 2, 3], help="Downscale divisor (1=1080p, 2=540p, 3=360p)")
+    ap.add_argument("--scale", type=int, default=2, choices=[1, 2, 3, 4], help="Resolution preset (1=1080p FHD, 2=720p HD, 3=540p, 4=360p)")
     args = ap.parse_args()
 
     cfg = load_saved_config()

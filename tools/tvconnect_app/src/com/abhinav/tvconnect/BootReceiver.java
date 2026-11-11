@@ -9,7 +9,9 @@ public class BootReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
         Log.i("TvConnectBoot", "Boot broadcast received: " + (intent != null ? intent.getAction() : "null"));
-        TokenStore.getToken(context);
+        try {
+            TokenStore.getToken(context);
+        } catch (Throwable ignored) {}
     }
 }
 

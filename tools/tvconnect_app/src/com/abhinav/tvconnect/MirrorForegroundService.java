@@ -30,20 +30,32 @@ public class MirrorForegroundService extends Service {
     public static final String EXTRA_RESULT_CODE = "result_code";
     public static final String EXTRA_DATA = "data";
 
+    private static volatile MirrorForegroundService instance = null;
     private static volatile boolean active = false;
     private static volatile byte[] latestJpeg = null;
     private static volatile long latestSeq = 0;
+    private static volatile int curWidth = 1280;
+    private static volatile int curHeight = 720;
+    private static volatile int curQuality = 80;
+    private static volatile long lastConfigReqMs = 0;
     private static final Object frameLock = new Object();
 
     private MediaProjection projection;
     private VirtualDisplay virtualDisplay;
     private ImageReader imageReader;
-    private HandlerThread workerThread;
-    private Handler workerHandler;
-    private volatile long lastEncodeMs = 0;
+    private HandlerThread captureThread;
+    private Handler captureHandler;
+    private HandlerThread encodeThread;
+    private Handler encodeHandler;
 
-    private final int width = 960;
-    private final int height = 540;
+    private volatile long lastEncodeMs = 0;
+    private volatile boolean encodeBusy = false;
+
+    // Owned exclusively by encodeHandler (and capture cleanup)
+    private Bitmap reusableFull = null;
+    private int reusableFullW = 0;
+    private int reusableFullH = 0;
+    private final ByteArrayOutputStream reusableBaos = new ByteArrayOutputStream(98304);
 
     public static boolean isActive() {
         return active && latestJpeg != null;
@@ -61,6 +73,86 @@ public class MirrorForegroundService extends Service {
         return latestSeq;
     }
 
+    public static int getStreamWidth() {
+        return curWidth;
+    }
+
+    public static int getStreamHeight() {
+        return curHeight;
+    }
+
+    public static int getStreamQuality() {
+        return curQuality;
+    }
+
+    public static void seedFrameIfEmpty(byte[] jpg) {
+        if (jpg == null || jpg.length == 0) return;
+        synchronized (frameLock) {
+            if (latestJpeg == null) {
+                latestJpeg = jpg;
+                latestSeq++;
+                frameLock.notifyAll();
+            }
+        }
+    }
+
+    public static void resolvePreset(int scale, String res, int quality, int[] outWHQ) {
+        int w = 1280;
+        int h = 720;
+        int q = (quality >= 35 && quality <= 95) ? quality : 80;
+        if (res != null && !res.isEmpty()) {
+            String r = res.trim().toLowerCase();
+            if ("1080p".equals(r) || "fhd".equals(r)) {
+                w = 1920; h = 1080;
+                if (quality <= 0) q = 82;
+            } else if ("720p".equals(r) || "hd".equals(r)) {
+                w = 1280; h = 720;
+                if (quality <= 0) q = 80;
+            } else if ("540p".equals(r) || "qhd".equals(r)) {
+                w = 960; h = 540;
+                if (quality <= 0) q = 72;
+            } else if ("360p".equals(r) || "eco".equals(r)) {
+                w = 640; h = 360;
+                if (quality <= 0) q = 65;
+            }
+        } else if (scale == 1) {
+            w = 1920; h = 1080;
+            if (quality <= 0) q = 82;
+        } else if (scale == 2) {
+            w = 1280; h = 720;
+            if (quality <= 0) q = 80;
+        } else if (scale == 3) {
+            w = 960; h = 540;
+            if (quality <= 0) q = 72;
+        } else if (scale >= 4) {
+            w = 640; h = 360;
+            if (quality <= 0) q = 65;
+        }
+        outWHQ[0] = w;
+        outWHQ[1] = h;
+        outWHQ[2] = q;
+    }
+
+    public static void configure(int targetW, int targetH, int targetQ) {
+        int q = Math.max(35, Math.min(95, targetQ));
+        curQuality = q;
+        MirrorForegroundService svc = instance;
+        if (svc == null || !active) {
+            curWidth = targetW;
+            curHeight = targetH;
+            return;
+        }
+        if (targetW == curWidth && targetH == curHeight) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastConfigReqMs < 350) {
+            return;
+        }
+        lastConfigReqMs = now;
+        svc.requestResize(targetW, targetH);
+    }
+
     public static byte[] waitNextFrame(long lastSeenSeq, long timeoutMs) {
         synchronized (frameLock) {
             if (latestJpeg != null && latestSeq != lastSeenSeq) {
@@ -76,9 +168,14 @@ public class MirrorForegroundService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        workerThread = new HandlerThread("MirrorEncode");
-        workerThread.start();
-        workerHandler = new Handler(workerThread.getLooper());
+        instance = this;
+        captureThread = new HandlerThread("MirrorCap", -4);
+        captureThread.start();
+        captureHandler = new Handler(captureThread.getLooper());
+
+        encodeThread = new HandlerThread("MirrorEnc", -2);
+        encodeThread.start();
+        encodeHandler = new Handler(encodeThread.getLooper());
     }
 
     @Override
@@ -112,62 +209,128 @@ public class MirrorForegroundService extends Service {
                 cleanupCapture();
                 stopSelf();
             }
-        }, workerHandler);
+        }, captureHandler);
 
-        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
-        imageReader.setOnImageAvailableListener(reader -> {
-            Image img = null;
-            try {
-                img = reader.acquireLatestImage();
-                if (img == null) return;
-                long now = System.currentTimeMillis();
-                if (now - lastEncodeMs < 45) {
-                    return;
-                }
-                lastEncodeMs = now;
-                Image.Plane[] planes = img.getPlanes();
-                if (planes == null || planes.length == 0) return;
-                ByteBuffer buf = planes[0].getBuffer();
-                int pixelStride = planes[0].getPixelStride();
-                int rowStride = planes[0].getRowStride();
-                int rowPadding = rowStride - pixelStride * width;
-                int bmpW = width + rowPadding / pixelStride;
-
-                Bitmap full = Bitmap.createBitmap(bmpW, height, Bitmap.Config.ARGB_8888);
-                full.copyPixelsFromBuffer(buf);
-                Bitmap cropped = (bmpW == width) ? full : Bitmap.createBitmap(full, 0, 0, width, height);
-                if (cropped != full) full.recycle();
-
-                ByteArrayOutputStream baos = new ByteArrayOutputStream(32768);
-                cropped.compress(Bitmap.CompressFormat.JPEG, 68, baos);
-                cropped.recycle();
-
-                byte[] jpg = baos.toByteArray();
-                synchronized (frameLock) {
-                    latestJpeg = jpg;
-                    latestSeq++;
-                    frameLock.notifyAll();
-                }
-            } catch (Throwable t) {
-                Log.w(TAG, "Frame encode err: " + t.getMessage());
-            } finally {
-                if (img != null) img.close();
-            }
-        }, workerHandler);
-
+        int w = curWidth;
+        int h = curHeight;
+        imageReader = buildReader(w, h);
         virtualDisplay = projection.createVirtualDisplay(
             "TvMirror",
-            width,
-            height,
-            160,
+            w,
+            h,
+            dpiForWidth(w),
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader.getSurface(),
             null,
-            workerHandler
+            captureHandler
         );
         active = true;
-        Log.i(TAG, "Hardware MediaProjection VirtualDisplay active (" + width + "x" + height + ")");
+        Log.i(TAG, "Hardware MediaProjection VirtualDisplay active (" + w + "x" + h + " q=" + curQuality + ")");
         return START_NOT_STICKY;
+    }
+
+    private static int dpiForWidth(int w) {
+        if (w >= 1920) return 320;
+        if (w >= 1280) return 213;
+        return 160;
+    }
+
+    private ImageReader buildReader(final int targetW, final int targetH) {
+        ImageReader reader = ImageReader.newInstance(targetW, targetH, PixelFormat.RGBA_8888, 4);
+        reader.setOnImageAvailableListener(r -> {
+            Image img = null;
+            try {
+                img = r.acquireLatestImage();
+                if (img == null) return;
+                long now = System.currentTimeMillis();
+                if (encodeBusy || (now - lastEncodeMs < 16)) {
+                    img.close();
+                    return;
+                }
+                lastEncodeMs = now;
+                encodeBusy = true;
+
+                Image.Plane[] planes = img.getPlanes();
+                if (planes == null || planes.length == 0) {
+                    encodeBusy = false;
+                    img.close();
+                    return;
+                }
+                ByteBuffer buf = planes[0].getBuffer();
+                int pixelStride = planes[0].getPixelStride();
+                int rowStride = planes[0].getRowStride();
+                int rowPadding = rowStride - pixelStride * targetW;
+                int bmpW = targetW + rowPadding / pixelStride;
+                int bmpH = targetH;
+
+                Bitmap snap;
+                synchronized (this) {
+                    if (reusableFull == null || reusableFullW != bmpW || reusableFullH != bmpH) {
+                        if (reusableFull != null && !reusableFull.isRecycled()) {
+                            reusableFull.recycle();
+                        }
+                        reusableFull = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888);
+                        reusableFullW = bmpW;
+                        reusableFullH = bmpH;
+                    }
+                    buf.rewind();
+                    reusableFull.copyPixelsFromBuffer(buf);
+                    snap = (bmpW == targetW)
+                        ? reusableFull.copy(Bitmap.Config.ARGB_8888, false)
+                        : Bitmap.createBitmap(reusableFull, 0, 0, targetW, targetH);
+                }
+                img.close();
+                img = null;
+
+                final Bitmap toEncode = snap;
+                final int q = curQuality;
+                encodeHandler.post(() -> {
+                    try {
+                        reusableBaos.reset();
+                        toEncode.compress(Bitmap.CompressFormat.JPEG, q, reusableBaos);
+                        toEncode.recycle();
+                        byte[] jpg = reusableBaos.toByteArray();
+                        synchronized (frameLock) {
+                            latestJpeg = jpg;
+                            latestSeq++;
+                            frameLock.notifyAll();
+                        }
+                    } catch (Throwable t) {
+                        Log.w(TAG, "Async encode err: " + t.getMessage());
+                    } finally {
+                        encodeBusy = false;
+                    }
+                });
+            } catch (Throwable t) {
+                encodeBusy = false;
+                Log.w(TAG, "Frame cap err: " + t.getMessage());
+                if (img != null) {
+                    try { img.close(); } catch (Throwable ignored) {}
+                }
+            }
+        }, captureHandler);
+        return reader;
+    }
+
+    private void requestResize(final int newW, final int newH) {
+        captureHandler.post(() -> {
+            if (!active || virtualDisplay == null) return;
+            try {
+                ImageReader oldReader = imageReader;
+                ImageReader newReader = buildReader(newW, newH);
+                virtualDisplay.resize(newW, newH, dpiForWidth(newW));
+                virtualDisplay.setSurface(newReader.getSurface());
+                imageReader = newReader;
+                curWidth = newW;
+                curHeight = newH;
+                if (oldReader != null) {
+                    try { oldReader.close(); } catch (Throwable ignored) {}
+                }
+                Log.i(TAG, "Resized VirtualDisplay -> " + newW + "x" + newH);
+            } catch (Throwable t) {
+                Log.w(TAG, "Resize failed: " + t.getMessage());
+            }
+        });
     }
 
     private void startForegroundCompat() {
@@ -180,7 +343,7 @@ public class MirrorForegroundService extends Service {
             ? new Notification.Builder(this, CH_ID)
             : new Notification.Builder(this);
         Notification notif = nb.setContentTitle("TV Connect Live Mirror")
-            .setContentText("Hardware screen stream ready")
+            .setContentText("HD hardware screen stream ready")
             .setSmallIcon(android.R.drawable.presence_video_online)
             .build();
         if (Build.VERSION.SDK_INT >= 29) {
@@ -192,6 +355,7 @@ public class MirrorForegroundService extends Service {
 
     private void cleanupCapture() {
         active = false;
+        encodeBusy = false;
         if (virtualDisplay != null) {
             try { virtualDisplay.release(); } catch (Throwable ignored) {}
             virtualDisplay = null;
@@ -204,14 +368,22 @@ public class MirrorForegroundService extends Service {
             try { projection.stop(); } catch (Throwable ignored) {}
             projection = null;
         }
+        synchronized (this) {
+            if (reusableFull != null && !reusableFull.isRecycled()) {
+                reusableFull.recycle();
+                reusableFull = null;
+            }
+            reusableFullW = 0;
+            reusableFullH = 0;
+        }
     }
 
     @Override
     public void onDestroy() {
+        if (instance == this) instance = null;
         cleanupCapture();
-        if (workerThread != null) {
-            workerThread.quitSafely();
-        }
+        if (captureThread != null) captureThread.quitSafely();
+        if (encodeThread != null) encodeThread.quitSafely();
         super.onDestroy();
     }
 
@@ -220,4 +392,3 @@ public class MirrorForegroundService extends Service {
         return null;
     }
 }
-

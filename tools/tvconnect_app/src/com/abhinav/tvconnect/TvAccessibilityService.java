@@ -5,8 +5,12 @@ import android.accessibilityservice.GestureDescription;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.ColorSpace;
+import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.PixelFormat;
 import android.hardware.HardwareBuffer;
 import android.media.AudioManager;
 import android.net.Uri;
@@ -17,7 +21,10 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.Display;
+import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.View;
+import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
@@ -58,15 +65,81 @@ public class TvAccessibilityService extends AccessibilityService {
     private long lastTapX = 960;
     private long lastTapY = 540;
 
+    private WindowManager wm;
+    private CursorOverlayView cursorView;
+    private WindowManager.LayoutParams cursorLp;
+    private volatile boolean cursorEnabled = true;
+    private final Runnable hideCursorTask = () -> {
+        if (cursorView != null && cursorView.getVisibility() == View.VISIBLE) {
+            cursorView.setVisibility(View.GONE);
+        }
+    };
+
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
         running = true;
         alive = true;
         TokenStore.getToken(this);
+        mainHandler.post(this::initCursorOverlay);
         startServerLoop(8089, true);
         startServerLoop(8088, false);
         Log.i(TAG, "TvAccessibilityService connected");
+    }
+
+    private void initCursorOverlay() {
+        if (cursorView != null) return;
+        try {
+            wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+            if (wm == null) return;
+            cursorView = new CursorOverlayView(this);
+            cursorView.setVisibility(View.GONE);
+            int sizePx = Math.round(getResources().getDisplayMetrics().density * 44f);
+            if (sizePx < 48) sizePx = 56;
+            cursorLp = new WindowManager.LayoutParams(
+                sizePx,
+                sizePx,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                    | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            );
+            cursorLp.gravity = Gravity.TOP | Gravity.START;
+            cursorLp.x = 960;
+            cursorLp.y = 540;
+            wm.addView(cursorView, cursorLp);
+        } catch (Throwable t) {
+            Log.w(TAG, "Cursor overlay init failed: " + t.getMessage());
+        }
+    }
+
+    private void updateCursorOverlay(final int x, final int y, final boolean show, final boolean clickRipple) {
+        lastTapX = x;
+        lastTapY = y;
+        mainHandler.post(() -> {
+            if (cursorView == null) initCursorOverlay();
+            if (cursorView == null || wm == null || cursorLp == null) return;
+            mainHandler.removeCallbacks(hideCursorTask);
+            if (!cursorEnabled || !show) {
+                cursorView.setVisibility(View.GONE);
+                return;
+            }
+            int hot = cursorView.hotspot();
+            cursorLp.x = Math.max(-hot, Math.min(1919 - hot, x - hot));
+            cursorLp.y = Math.max(-hot, Math.min(1079 - hot, y - hot));
+            if (cursorView.getVisibility() != View.VISIBLE) {
+                cursorView.setVisibility(View.VISIBLE);
+            }
+            try {
+                wm.updateViewLayout(cursorView, cursorLp);
+            } catch (Throwable ignored) {}
+            if (clickRipple) {
+                cursorView.triggerRipple();
+            }
+            mainHandler.postDelayed(hideCursorTask, 4500);
+        });
     }
 
     @Override
@@ -119,6 +192,11 @@ public class TvAccessibilityService extends AccessibilityService {
         alive = false;
         closeSocket(server8089);
         closeSocket(server8088);
+        mainHandler.removeCallbacks(hideCursorTask);
+        if (wm != null && cursorView != null) {
+            try { wm.removeViewImmediate(cursorView); } catch (Throwable ignored) {}
+            cursorView = null;
+        }
         captureExec.shutdownNow();
         httpPool.shutdownNow();
         super.onDestroy();
@@ -192,6 +270,7 @@ public class TvAccessibilityService extends AccessibilityService {
 
     private void handleClient(Socket sock) {
         try (Socket s = sock) {
+            s.setTcpNoDelay(true);
             s.setSoTimeout(15000);
             BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
             String reqLine = in.readLine();
@@ -269,17 +348,52 @@ public class TvAccessibilityService extends AccessibilityService {
 
             if ("/api/fast_status".equals(path)) {
                 writeJson(out, 200, "{\"ok\":true,\"projection_active\":" + MirrorForegroundService.isActive()
-                    + ",\"seq\":" + MirrorForegroundService.getLatestSeq() + "}");
+                    + ",\"seq\":" + MirrorForegroundService.getLatestSeq()
+                    + ",\"width\":" + MirrorForegroundService.getStreamWidth()
+                    + ",\"height\":" + MirrorForegroundService.getStreamHeight()
+                    + ",\"quality\":" + MirrorForegroundService.getStreamQuality()
+                    + ",\"cursor_enabled\":" + cursorEnabled + "}");
                 return;
             }
 
             if ("/api/start_mirror".equals(path)) {
+                int[] whq = new int[3];
+                MirrorForegroundService.resolvePreset(
+                    parseInt(query.get("scale"), 2),
+                    query.get("res"),
+                    parseInt(query.get("q"), 0),
+                    whq
+                );
+                MirrorForegroundService.configure(whq[0], whq[1], whq[2]);
                 if (!MirrorForegroundService.isProjectionStarted()) {
                     Intent pi = new Intent(this, ProjectionConsentActivity.class);
                     pi.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     startActivity(pi);
                 }
-                writeJson(out, 200, "{\"ok\":true,\"projection_active\":" + MirrorForegroundService.isActive() + "}");
+                if (MirrorForegroundService.getLatestJpeg() == null) {
+                    httpPool.execute(() -> {
+                        byte[] seed = captureJpeg(2, 72);
+                        if (seed != null) MirrorForegroundService.seedFrameIfEmpty(seed);
+                    });
+                }
+                writeJson(out, 200, "{\"ok\":true,\"projection_active\":" + MirrorForegroundService.isActive()
+                    + ",\"width\":" + whq[0] + ",\"height\":" + whq[1] + "}");
+                return;
+            }
+
+            if ("/api/cursor".equals(path)) {
+                if (query.containsKey("enabled")) {
+                    cursorEnabled = !"0".equals(query.get("enabled")) && !"false".equalsIgnoreCase(query.get("enabled"));
+                    if (!cursorEnabled) {
+                        updateCursorOverlay((int) lastTapX, (int) lastTapY, false, false);
+                    }
+                }
+                int x = parseInt(query.get("x"), (int) lastTapX);
+                int y = parseInt(query.get("y"), (int) lastTapY);
+                boolean show = !"0".equals(query.get("visible"));
+                boolean click = "1".equals(query.get("click"));
+                updateCursorOverlay(x, y, show, click);
+                writeJson(out, 200, "{\"ok\":true,\"cursor_enabled\":" + cursorEnabled + ",\"x\":" + x + ",\"y\":" + y + "}");
                 return;
             }
 
@@ -297,12 +411,16 @@ public class TvAccessibilityService extends AccessibilityService {
             }
 
             if ("/api/screen.jpg".equals(path) || "/api/screen".equals(path)) {
-                int scale = parseInt(query.get("scale"), 2);
-                int q = parseInt(query.get("q"), 65);
-                byte[] jpg = (scale == 2 && MirrorForegroundService.isActive())
-                    ? MirrorForegroundService.getLatestJpeg()
-                    : null;
-                if (jpg == null) jpg = captureJpeg(scale, q);
+                int[] whq = new int[3];
+                MirrorForegroundService.resolvePreset(
+                    parseInt(query.get("scale"), 2),
+                    query.get("res"),
+                    parseInt(query.get("q"), 0),
+                    whq
+                );
+                MirrorForegroundService.configure(whq[0], whq[1], whq[2]);
+                byte[] jpg = MirrorForegroundService.isActive() ? MirrorForegroundService.getLatestJpeg() : null;
+                if (jpg == null) jpg = captureJpeg(parseInt(query.get("scale"), 2), whq[2]);
                 if (jpg == null && MirrorForegroundService.isActive()) jpg = MirrorForegroundService.getLatestJpeg();
                 if (jpg == null) {
                     writeJson(out, 500, "{\"ok\":false,\"error\":\"screenshot failed\"}");
@@ -315,8 +433,14 @@ public class TvAccessibilityService extends AccessibilityService {
             }
 
             if ("/api/mirror.mjpeg".equals(path)) {
-                int scale = parseInt(query.get("scale"), 2);
-                int q = parseInt(query.get("q"), 65);
+                int[] whq = new int[3];
+                MirrorForegroundService.resolvePreset(
+                    parseInt(query.get("scale"), 2),
+                    query.get("res"),
+                    parseInt(query.get("q"), 0),
+                    whq
+                );
+                MirrorForegroundService.configure(whq[0], whq[1], whq[2]);
                 String hdr = "HTTP/1.1 200 OK\r\n"
                     + "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
                     + "Cache-Control: no-store, no-cache\r\n"
@@ -328,10 +452,11 @@ public class TvAccessibilityService extends AccessibilityService {
                 while (alive && !s.isClosed()) {
                     byte[] frame;
                     if (MirrorForegroundService.isActive()) {
-                        frame = MirrorForegroundService.waitNextFrame(lastSeq, 500);
+                        frame = MirrorForegroundService.waitNextFrame(lastSeq, 90);
                         lastSeq = MirrorForegroundService.getLatestSeq();
                     } else {
-                        frame = captureJpeg(scale, q);
+                        frame = captureJpeg(parseInt(query.get("scale"), 2), whq[2]);
+                        if (frame != null) MirrorForegroundService.seedFrameIfEmpty(frame);
                     }
                     if (frame != null) {
                         String partHdr = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + frame.length + "\r\n\r\n";
@@ -341,7 +466,7 @@ public class TvAccessibilityService extends AccessibilityService {
                         out.flush();
                     }
                     if (!MirrorForegroundService.isActive()) {
-                        try { Thread.sleep(150); } catch (InterruptedException ie) { break; }
+                        try { Thread.sleep(60); } catch (InterruptedException ie) { break; }
                     }
                 }
                 return;
@@ -354,9 +479,8 @@ public class TvAccessibilityService extends AccessibilityService {
                     writeJson(out, 400, "{\"ok\":false,\"error\":\"invalid coords\"}");
                     return;
                 }
-                lastTapX = x;
-                lastTapY = y;
-                performSwipe(x, y, x, y, 50);
+                updateCursorOverlay(x, y, true, true);
+                performSwipe(x, y, x, y, 45);
                 writeJson(out, 200, "{\"ok\":true}");
                 return;
             }
@@ -366,11 +490,12 @@ public class TvAccessibilityService extends AccessibilityService {
                 int y1 = parseInt(query.get("y1"), -1);
                 int x2 = parseInt(query.get("x2"), -1);
                 int y2 = parseInt(query.get("y2"), -1);
-                int ms = parseInt(query.get("ms"), 240);
+                int ms = parseInt(query.get("ms"), 220);
                 if (x1 < 0 || y1 < 0 || x2 < 0 || y2 < 0) {
                     writeJson(out, 400, "{\"ok\":false,\"error\":\"invalid swipe\"}");
                     return;
                 }
+                updateCursorOverlay(x2, y2, true, false);
                 performSwipe(x1, y1, x2, y2, ms);
                 writeJson(out, 200, "{\"ok\":true}");
                 return;
@@ -614,6 +739,80 @@ public class TvAccessibilityService extends AccessibilityService {
         writeHeaders(out, status, "application/json; charset=utf-8", b.length);
         out.write(b);
         out.flush();
+    }
+
+    private static final class CursorOverlayView extends View {
+        private final Paint shadowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint strokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint ripplePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path arrowPath = new Path();
+        private long rippleStartMs = 0;
+
+        CursorOverlayView(Context ctx) {
+            super(ctx);
+            float d = ctx.getResources().getDisplayMetrics().density;
+            float ox = 16f * d;
+            float oy = 16f * d;
+
+            shadowPaint.setColor(Color.argb(110, 0, 0, 0));
+            shadowPaint.setStyle(Paint.Style.FILL);
+
+            fillPaint.setColor(Color.WHITE);
+            fillPaint.setStyle(Paint.Style.FILL);
+
+            strokePaint.setColor(Color.rgb(15, 23, 42));
+            strokePaint.setStyle(Paint.Style.STROKE);
+            strokePaint.setStrokeWidth(Math.max(2.2f, 2.0f * d));
+            strokePaint.setStrokeJoin(Paint.Join.ROUND);
+
+            ripplePaint.setColor(Color.argb(200, 59, 130, 246));
+            ripplePaint.setStyle(Paint.Style.STROKE);
+            ripplePaint.setStrokeWidth(Math.max(2.5f, 2.5f * d));
+
+            // Sharp pointer arrow with hotspot at (ox, oy)
+            arrowPath.moveTo(ox, oy);
+            arrowPath.lineTo(ox, oy + 20f * d);
+            arrowPath.lineTo(ox + 5.2f * d, oy + 15.2f * d);
+            arrowPath.lineTo(ox + 9.2f * d, oy + 23.0f * d);
+            arrowPath.lineTo(ox + 12.2f * d, oy + 21.6f * d);
+            arrowPath.lineTo(ox + 8.2f * d, oy + 13.8f * d);
+            arrowPath.lineTo(ox + 14.5f * d, oy + 13.8f * d);
+            arrowPath.close();
+        }
+
+        int hotspot() {
+            return Math.round(16f * getResources().getDisplayMetrics().density);
+        }
+
+        void triggerRipple() {
+            rippleStartMs = SystemClock.uptimeMillis();
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float d = getResources().getDisplayMetrics().density;
+            float hot = 16f * d;
+            if (rippleStartMs > 0) {
+                long dt = SystemClock.uptimeMillis() - rippleStartMs;
+                if (dt < 260) {
+                    float t = dt / 260f;
+                    ripplePaint.setAlpha(Math.round(210 * (1f - t)));
+                    canvas.drawCircle(hot, hot, (4f + 13f * t) * d, ripplePaint);
+                    postInvalidateOnAnimation();
+                } else {
+                    rippleStartMs = 0;
+                }
+            }
+            canvas.save();
+            canvas.translate(1.5f * d, 2.0f * d);
+            canvas.drawPath(arrowPath, shadowPaint);
+            canvas.restore();
+            canvas.drawPath(arrowPath, fillPaint);
+            canvas.drawPath(arrowPath, strokePaint);
+        }
     }
 }
 

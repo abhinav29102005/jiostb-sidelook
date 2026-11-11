@@ -21,12 +21,12 @@
   * { box-sizing: border-box; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
   body { margin: 0; background: var(--bg); color: var(--txt); padding: 14px; }
   .layout {
-    max-width: 1380px; margin: 0 auto;
+    max-width: 1440px; margin: 0 auto;
     display: grid; grid-template-columns: 1fr; gap: 14px;
     align-items: start;
   }
-  @media (min-width: 960px) {
-    .layout { grid-template-columns: minmax(0, 1.55fr) 390px; }
+  @media (min-width: 980px) {
+    .layout { grid-template-columns: minmax(0, 1.65fr) 380px; }
   }
   .card {
     background: var(--card); border: 1px solid var(--border);
@@ -49,25 +49,86 @@
   button.primary { background: var(--accent); border-color: transparent; }
   button.active { background: var(--accent2); color: #04130d; border-color: transparent; }
   button.danger { background: rgba(239,68,68,.2); color: #fecaca; border-color: rgba(239,68,68,.4); }
+
+  /* Layered Viewport Stage */
   .screenWrap {
     position: relative; width: 100%; aspect-ratio: 16/9;
     background: #000; border-radius: 12px; overflow: hidden;
-    border: 1px solid var(--border); user-select: none; cursor: crosshair;
+    border: 1px solid var(--border); user-select: none;
+    isolation: isolate; cursor: crosshair;
   }
-  #tvScreen {
+  .screenWrap.hideNativeCursor { cursor: none; }
+  .screenWrap:fullscreen {
+    width: 100vw; height: 100vh; border-radius: 0; border: none;
+    display: flex; align-items: center; justify-content: center; background: #000;
+  }
+
+  /* Layer 0: Base HD Frame Canvas */
+  #tvCanvas {
+    position: relative; z-index: 1;
     width: 100%; height: 100%; object-fit: contain; display: block;
     pointer-events: none;
   }
-  .overlayHint {
-    position: absolute; bottom: 8px; left: 8px; right: 8px;
-    display: flex; justify-content: space-between; align-items: center;
-    pointer-events: none; font-size: 11px; color: rgba(255,255,255,.78);
-    text-shadow: 0 1px 3px rgba(0,0,0,.9);
+
+  /* Layer 1: High-Frequency Interactive Cursor & Ripple Layer */
+  .cursorLayer {
+    position: absolute; inset: 0; z-index: 10;
+    pointer-events: none; overflow: hidden;
   }
+  #dragSvg {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    pointer-events: none;
+  }
+  #tvCursor {
+    position: absolute; top: 0; left: 0; width: 26px; height: 30px;
+    opacity: 0; pointer-events: none;
+    transform: translate3d(-100px, -100px, 0);
+    transition: opacity .12s ease;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,.75));
+    will-change: transform;
+  }
+  #tvCursor.visible { opacity: 1; }
+  #tvCursor.pressed svg { transform: scale(0.84); }
+  #tvCursor svg { width: 100%; height: 100%; transition: transform .07s ease; transform-origin: 2px 2px; }
+
+  .rippleRing {
+    position: absolute; top: 0; left: 0; width: 28px; height: 28px;
+    margin-left: -14px; margin-top: -14px; border-radius: 50%;
+    border: 2.5px solid #60a5fa; opacity: 0; pointer-events: none;
+  }
+  .rippleRing.go { animation: clickRipple .34s ease-out forwards; }
+  @keyframes clickRipple {
+    0% { transform: scale(.35); opacity: .95; }
+    100% { transform: scale(1.75); opacity: 0; }
+  }
+
+  /* Layer 2: Floating Translucent HUD Overlay */
+  .hudLayer {
+    position: absolute; inset: 0; z-index: 20;
+    pointer-events: none; padding: 10px;
+    display: flex; flex-direction: column; justify-content: space-between;
+    transition: opacity .22s ease;
+  }
+  .screenWrap.hudIdle .hudLayer { opacity: 0; }
+  .hudBar {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    flex-wrap: wrap; pointer-events: none;
+  }
+  .hudGroup { display: flex; gap: 6px; align-items: center; pointer-events: auto; }
   .pill {
-    background: rgba(8,11,18,.78); border: 1px solid rgba(255,255,255,.16);
-    padding: 3px 8px; border-radius: 999px; backdrop-filter: blur(6px);
+    background: rgba(8,11,18,.76); border: 1px solid rgba(255,255,255,.16);
+    padding: 4px 10px; border-radius: 999px; backdrop-filter: blur(8px);
+    font-size: 11px; color: rgba(241,245,249,.92); pointer-events: none;
+    text-shadow: 0 1px 2px rgba(0,0,0,.8);
   }
+  .hudBtn {
+    background: rgba(15,23,42,.82); border: 1px solid rgba(255,255,255,.2);
+    color: #f8fafc; border-radius: 999px; padding: 4px 10px;
+    font-size: 11px; font-weight: 600; backdrop-filter: blur(8px);
+  }
+  .hudBtn:hover { background: rgba(37,99,235,.78); }
+  .hudBtn.on { background: rgba(16,185,129,.85); color: #03150e; border-color: transparent; }
+
   .stack { display: flex; flex-direction: column; gap: 12px; }
   .row { display: flex; gap: 8px; align-items: center; }
   .row > * { flex: 1; }
@@ -104,24 +165,56 @@
     <div class="toolbar">
       <button id="streamBtn" class="active" onclick="toggleStream()">Live Mirror: ON</button>
       <button id="kbdBtn" onclick="toggleKeyboardCapture()">Laptop Keyboard: OFF</button>
+      <button id="tvCursorBtn" class="active" onclick="toggleStbCursor()">TV Cursor: ON</button>
       <select id="qualitySel" onchange="restartStreamIfOn()">
-        <option value="scale=2&q=65" selected>Fast 960x540 (Low Latency)</option>
-        <option value="scale=1&q=70">Full 1920x1080 (Crisp)</option>
-        <option value="scale=3&q=55">Eco 640x360 (Cellular/Slow Net)</option>
+        <option value="res=720p&scale=2&q=80" selected>HD 1280x720 (High FPS)</option>
+        <option value="res=1080p&scale=1&q=84">Full HD 1920x1080 (Crisp)</option>
+        <option value="res=540p&scale=3&q=72">Smooth 960x540 (Low Net)</option>
+        <option value="res=360p&scale=4&q=62">Eco 640x360 (Cellular)</option>
       </select>
-      <button onclick="snapOnce()">Snap Now</button>
+      <button onclick="snapOnce()">Snap HD</button>
+      <button onclick="toggleFullscreen()">Fullscreen</button>
     </div>
 
-    <div class="screenWrap" id="screenBox" title="Click to Tap • Drag to Swipe • Scroll Wheel for Up/Down">
-      <canvas id="tvCanvas" width="960" height="540" style="width:100%;height:100%;object-fit:contain;display:block;pointer-events:none;"></canvas>
-      <div class="overlayHint">
-        <span class="pill" id="coordsHint">Connecting mirror stream...</span>
-        <span class="pill" id="modeHint">Keyboard Capture: OFF</span>
+    <div class="screenWrap" id="screenBox" title="Left Click: Tap • Drag: Swipe • Right Click: Back • Middle Click: Home • Wheel: Scroll">
+      <!-- Layer 0: Base HD Frame Canvas -->
+      <canvas id="tvCanvas" width="1280" height="720"></canvas>
+
+      <!-- Layer 1: Low-Latency Interactive Cursor & Swipe Vector Layer -->
+      <div class="cursorLayer" id="cursorLayer">
+        <svg id="dragSvg">
+          <line id="dragLine" x1="0" y1="0" x2="0" y2="0" stroke="#60a5fa" stroke-width="2.5" stroke-dasharray="5 4" visibility="hidden"/>
+        </svg>
+        <div class="rippleRing" id="clickRipple"></div>
+        <div id="tvCursor">
+          <svg viewBox="0 0 24 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M2 2L2 22.5L7.5 17.2L11.8 26L15 24.4L10.7 15.6L18.2 15.6L2 2Z"
+                  fill="#FFFFFF" stroke="#0F172A" stroke-width="2" stroke-linejoin="round"/>
+          </svg>
+        </div>
+      </div>
+
+      <!-- Layer 2: Floating Translucent HUD Overlay -->
+      <div class="hudLayer">
+        <div class="hudBar">
+          <span class="pill" id="coordsHint">Starting HD mirror...</span>
+          <div class="hudGroup">
+            <span class="pill" id="cursorPosPill">960, 540</span>
+            <button class="hudBtn" onclick="toggleFullscreen()">⛶ Fullscreen</button>
+          </div>
+        </div>
+        <div class="hudBar">
+          <span class="pill" id="modeHint">Left: Tap • Drag: Swipe • Right: Back • Middle: Home</span>
+          <div class="hudGroup">
+            <button class="hudBtn" onclick="k(4)">◀ Back</button>
+            <button class="hudBtn" onclick="k(3)">⌂ Home</button>
+          </div>
+        </div>
       </div>
     </div>
 
     <div class="sub" style="margin-top:8px">
-      Hardware 30fps H.264 stream for desktop <code>mpv</code>/<code>ffplay</code>/<code>laptop_mirror_client.py</code>:
+      Desktop H.264 stream URL (<code>mpv</code>/<code>ffplay</code>) or use <code>python3 tools/laptop_mirror_client.py</code>:
       <code class="tiny" id="h264Url">Set API token to reveal stream URL</code>
     </div>
   </div>
@@ -196,14 +289,29 @@ document.getElementById('tok').value = token;
 
 let streamOn = true;
 let kbdCapture = false;
+let stbCursorOn = true;
 let dragStart = null;
 let dragMoved = false;
 let streamAbort = null;
 let frameCount = 0;
 let fpsWindowStart = performance.now();
 
+// Non-blocking frame slot (drops backlog frames cleanly for minimum glass-to-glass latency)
+let pendingJpg = null;
+let paintLoopRunning = false;
+
+const screenBox = document.getElementById('screenBox');
 const canvas = document.getElementById('tvCanvas');
 const ctx2d = canvas.getContext('2d');
+const tvCursor = document.getElementById('tvCursor');
+const clickRipple = document.getElementById('clickRipple');
+const dragLine = document.getElementById('dragLine');
+const cursorPosPill = document.getElementById('cursorPosPill');
+
+let lastCursorSend = 0;
+let lastSentX = -1;
+let lastSentY = -1;
+let hudIdleTimer = null;
 
 async function drawJpegBytes(u8) {
   const blob = new Blob([u8], { type: 'image/jpeg' });
@@ -216,11 +324,32 @@ async function drawJpegBytes(u8) {
   bmp.close();
   frameCount++;
   const now = performance.now();
-  if (now - fpsWindowStart >= 1000) {
+  if (now - fpsWindowStart >= 800) {
     const fps = (frameCount * 1000 / (now - fpsWindowStart)).toFixed(1);
-    document.getElementById('coordsHint').textContent = `LIVE ${bmp.width}x${bmp.height} • ${fps} fps`;
+    const badge = canvas.width >= 1920 ? 'FHD' : canvas.width >= 1280 ? 'HD' : 'SD';
+    document.getElementById('coordsHint').textContent = `LIVE ${badge} ${canvas.width}x${canvas.height} • ${fps} fps`;
     frameCount = 0;
     fpsWindowStart = now;
+  }
+}
+
+async function pumpFrames(ac) {
+  if (paintLoopRunning) return;
+  paintLoopRunning = true;
+  try {
+    while (streamOn && streamAbort === ac && !ac.signal.aborted) {
+      if (pendingJpg) {
+        const jpg = pendingJpg;
+        pendingJpg = null;
+        try {
+          await drawJpegBytes(jpg);
+        } catch (_) {}
+      } else {
+        await new Promise(r => requestAnimationFrame(r));
+      }
+    }
+  } finally {
+    paintLoopRunning = false;
   }
 }
 
@@ -236,10 +365,12 @@ async function startStream() {
   if (!token) return;
   updateStreamURLHint();
   const q = document.getElementById('qualitySel').value;
-  api('/api/start_mirror').catch(() => {});
+  api('/api/start_mirror?' + q).catch(() => {});
   const ac = new AbortController();
   streamAbort = ac;
-  document.getElementById('coordsHint').textContent = 'Starting hardware mirror...';
+  pendingJpg = null;
+  document.getElementById('coordsHint').textContent = 'Starting HD hardware mirror...';
+  pumpFrames(ac);
 
   while (streamOn && streamAbort === ac && !ac.signal.aborted) {
     try {
@@ -254,6 +385,7 @@ async function startStream() {
         merged.set(buf, 0);
         merged.set(value, buf.length);
         buf = merged;
+        let newest = null;
         while (true) {
           const soi = findBytes(buf, 0xff, 0xd8, 0);
           if (soi < 0) {
@@ -265,19 +397,19 @@ async function startStream() {
             if (soi > 0) buf = buf.slice(soi);
             break;
           }
-          const jpg = buf.slice(soi, eoi + 2);
+          newest = buf.slice(soi, eoi + 2);
           buf = buf.slice(eoi + 2);
-          await drawJpegBytes(jpg);
         }
+        if (newest) pendingJpg = newest;
       }
     } catch (e) {
       if (ac.signal.aborted || !streamOn) break;
       document.getElementById('coordsHint').textContent = 'Reconnecting mirror...';
       try {
         const r = await fetch('/api/screen.jpg?' + q + '&token=' + encodeURIComponent(token) + '&ts=' + Date.now(), { signal: ac.signal });
-        if (r.ok) await drawJpegBytes(new Uint8Array(await r.arrayBuffer()));
+        if (r.ok) pendingJpg = new Uint8Array(await r.arrayBuffer());
       } catch (_) {}
-      await new Promise(r => setTimeout(r, 400));
+      await new Promise(r => setTimeout(r, 350));
     }
   }
 }
@@ -287,6 +419,7 @@ function stopStream() {
     streamAbort.abort();
     streamAbort = null;
   }
+  pendingJpg = null;
 }
 
 async function snapOnce() {
@@ -309,6 +442,22 @@ function restartStreamIfOn() {
   if (streamOn) startStream();
 }
 
+function toggleStbCursor() {
+  stbCursorOn = !stbCursorOn;
+  const btn = document.getElementById('tvCursorBtn');
+  btn.textContent = stbCursorOn ? 'TV Cursor: ON' : 'TV Cursor: OFF';
+  btn.classList.toggle('active', stbCursorOn);
+  api('/api/cursor?enabled=' + (stbCursorOn ? '1' : '0') + '&visible=' + (stbCursorOn ? '1' : '0')).catch(() => {});
+}
+
+function toggleFullscreen() {
+  if (!document.fullscreenElement) {
+    screenBox.requestFullscreen().catch(() => {});
+  } else {
+    document.exitFullscreen().catch(() => {});
+  }
+}
+
 function toggleKeyboardCapture() {
   kbdCapture = !kbdCapture;
   const btn = document.getElementById('kbdBtn');
@@ -316,43 +465,159 @@ function toggleKeyboardCapture() {
   btn.classList.toggle('active', kbdCapture);
   document.getElementById('modeHint').textContent = kbdCapture
     ? 'Keyboard Capture: ON (Esc=Back, Arrows=D-Pad, Type directly)'
-    : 'Keyboard Capture: OFF';
+    : 'Left: Tap • Drag: Swipe • Right: Back • Middle: Home';
   if (document.activeElement) document.activeElement.blur();
 }
 
-function boxToTV(ev) {
-  const box = document.getElementById('screenBox').getBoundingClientRect();
-  const x = Math.max(0, Math.min(1919, Math.round((ev.clientX - box.left) * 1920 / box.width)));
-  const y = Math.max(0, Math.min(1079, Math.round((ev.clientY - box.top) * 1080 / box.height)));
-  return { x, y };
+function getVideoRect() {
+  const box = screenBox.getBoundingClientRect();
+  const cw = canvas.width || 1280;
+  const ch = canvas.height || 720;
+  const aspect = cw / ch;
+  const boxAspect = box.width / Math.max(1, box.height);
+  let vw, vh, vx, vy;
+  if (boxAspect > aspect) {
+    vh = box.height;
+    vw = vh * aspect;
+    vx = (box.width - vw) / 2;
+    vy = 0;
+  } else {
+    vw = box.width;
+    vh = vw / aspect;
+    vx = 0;
+    vy = (box.height - vh) / 2;
+  }
+  return { box, vx, vy, vw, vh };
 }
 
-const screenBox = document.getElementById('screenBox');
+function boxToTV(ev) {
+  const { box, vx, vy, vw, vh } = getVideoRect();
+  const lx = ev.clientX - box.left;
+  const ly = ev.clientY - box.top;
+  const inside = lx >= vx && lx <= vx + vw && ly >= vy && ly <= vy + vh;
+  const rx = Math.max(0, Math.min(vw, lx - vx));
+  const ry = Math.max(0, Math.min(vh, ly - vy));
+  const tx = Math.max(0, Math.min(1919, Math.round(rx * 1920 / Math.max(1, vw))));
+  const ty = Math.max(0, Math.min(1079, Math.round(ry * 1080 / Math.max(1, vh))));
+  return { lx, ly, tx, ty, inside };
+}
+
+function wakeHud() {
+  screenBox.classList.remove('hudIdle');
+  clearTimeout(hudIdleTimer);
+  if (document.fullscreenElement) {
+    hudIdleTimer = setTimeout(() => screenBox.classList.add('hudIdle'), 2800);
+  }
+}
+
+function triggerClickRipple(lx, ly) {
+  clickRipple.style.left = lx + 'px';
+  clickRipple.style.top = ly + 'px';
+  clickRipple.classList.remove('go');
+  void clickRipple.offsetWidth;
+  clickRipple.classList.add('go');
+}
+
+function syncStbCursor(tx, ty, visible) {
+  if (!stbCursorOn || !token) return;
+  const now = performance.now();
+  if (visible && Math.abs(tx - lastSentX) + Math.abs(ty - lastSentY) < 4 && now - lastCursorSend < 150) return;
+  if (visible && now - lastCursorSend < 32) return;
+  lastCursorSend = now;
+  lastSentX = tx;
+  lastSentY = ty;
+  fetch(`/api/cursor?x=${tx}&y=${ty}&visible=${visible ? 1 : 0}&token=${encodeURIComponent(token)}`).catch(() => {});
+}
+
+screenBox.addEventListener('contextmenu', (ev) => ev.preventDefault());
+
+screenBox.addEventListener('pointerenter', (ev) => {
+  wakeHud();
+  const pos = boxToTV(ev);
+  if (pos.inside) {
+    screenBox.classList.add('hideNativeCursor');
+    tvCursor.classList.add('visible');
+  }
+});
+
+screenBox.addEventListener('pointerleave', () => {
+  tvCursor.classList.remove('visible');
+  screenBox.classList.remove('hideNativeCursor');
+  dragLine.setAttribute('visibility', 'hidden');
+  syncStbCursor(lastSentX < 0 ? 960 : lastSentX, lastSentY < 0 ? 540 : lastSentY, false);
+});
+
+screenBox.addEventListener('pointermove', (ev) => {
+  wakeHud();
+  const pos = boxToTV(ev);
+  if (pos.inside) {
+    screenBox.classList.add('hideNativeCursor');
+    tvCursor.classList.add('visible');
+    tvCursor.style.transform = `translate3d(${pos.lx - 2}px, ${pos.ly - 2}px, 0)`;
+    cursorPosPill.textContent = `${pos.tx}, ${pos.ty}`;
+    syncStbCursor(pos.tx, pos.ty, true);
+  } else {
+    screenBox.classList.remove('hideNativeCursor');
+    tvCursor.classList.remove('visible');
+  }
+  if (dragStart) {
+    if (Math.hypot(ev.clientX - dragStart.x, ev.clientY - dragStart.y) > 14) {
+      dragMoved = true;
+      dragLine.setAttribute('x1', dragStart.lx);
+      dragLine.setAttribute('y1', dragStart.ly);
+      dragLine.setAttribute('x2', pos.lx);
+      dragLine.setAttribute('y2', pos.ly);
+      dragLine.setAttribute('visibility', 'visible');
+    }
+  }
+});
+
 screenBox.addEventListener('pointerdown', (ev) => {
-  dragStart = { x: ev.clientX, y: ev.clientY, tv: boxToTV(ev) };
+  if (ev.target && ev.target.closest('button')) return;
+  wakeHud();
+  if (ev.button === 2) {
+    k(4);
+    return;
+  }
+  if (ev.button === 1) {
+    ev.preventDefault();
+    k(3);
+    return;
+  }
+  if (ev.button !== 0) return;
+  const pos = boxToTV(ev);
+  tvCursor.classList.add('pressed');
+  dragStart = { x: ev.clientX, y: ev.clientY, lx: pos.lx, ly: pos.ly, tx: pos.tx, ty: pos.ty };
   dragMoved = false;
 });
-screenBox.addEventListener('pointermove', (ev) => {
-  if (!dragStart) return;
-  if (Math.hypot(ev.clientX - dragStart.x, ev.clientY - dragStart.y) > 16) dragMoved = true;
-});
+
 screenBox.addEventListener('pointerup', (ev) => {
-  if (!dragStart) return;
+  tvCursor.classList.remove('pressed');
+  dragLine.setAttribute('visibility', 'hidden');
+  if (!dragStart || ev.button !== 0) return;
   const end = boxToTV(ev);
+  triggerClickRipple(end.lx, end.ly);
   if (dragMoved) {
-    document.getElementById('coordsHint').textContent = `Swipe (${dragStart.tv.x},${dragStart.tv.y}) -> (${end.x},${end.y})`;
-    api(`/api/swipe?x1=${dragStart.tv.x}&y1=${dragStart.tv.y}&x2=${end.x}&y2=${end.y}&ms=240`);
+    api(`/api/swipe?x1=${dragStart.tx}&y1=${dragStart.ty}&x2=${end.tx}&y2=${end.ty}&ms=220`);
   } else {
-    document.getElementById('coordsHint').textContent = `Tap (${end.x}, ${end.y})`;
-    api(`/api/tap?x=${end.x}&y=${end.y}`);
+    api(`/api/tap?x=${end.tx}&y=${end.ty}`);
   }
   dragStart = null;
 });
+
 screenBox.addEventListener('wheel', (ev) => {
   ev.preventDefault();
-  if (Math.abs(ev.deltaY) >= Math.abs(ev.deltaX)) k(ev.deltaY > 0 ? 20 : 19);
-  else k(ev.deltaX > 0 ? 22 : 21);
+  if (ev.shiftKey || Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) {
+    k((ev.deltaX || ev.deltaY) > 0 ? 22 : 21);
+  } else {
+    k(ev.deltaY > 0 ? 20 : 19);
+  }
 }, { passive: false });
+
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) screenBox.classList.remove('hudIdle');
+  else wakeHud();
+});
 
 const keyMap = {
   ArrowUp: 19, ArrowDown: 20, ArrowLeft: 21, ArrowRight: 22,
@@ -414,7 +679,7 @@ async function checkHealth() {
     const h = await api('/api/health');
     if (h && h.ok) {
       dot.classList.add('on');
-      info.textContent = `${h.model || h.device} • WiFi ${h.wifi_ip || '-'}` + (h.tailscale_ip ? ` • Tailscale ${h.tailscale_ip}` : ' • Tailscale: not signed in yet');
+      info.textContent = `${h.model || h.device} • WiFi ${h.wifi_ip || '-'}` + (h.tailscale_ip ? ` • Tailscale ${h.tailscale_ip}` : ' • Tailscale: offline');
     } else {
       dot.classList.remove('on');
       info.textContent = 'Enter valid API token to connect';
