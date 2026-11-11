@@ -173,9 +173,41 @@ Deploy the lightweight web remote server to control your TV from any phone brows
 ```
 Open on your mobile phone:
 ```text
-http://<STB_IP>:8080
+http://<STB_IP>:8088/?token=<TOKEN>
 ```
-*(Tap **Add to Home Screen** on your phone to turn it into an app with haptic touch controls).*
+*(Tap **Add to Home Screen** on your phone to turn it into a web remote with live screen capture, text input, app launcher, and haptic D-pad controls).*
+
+---
+
+## 🌐 Step 6: Anywhere Connection API & Remote Access (Over Any Network)
+
+To control the STB from **any Wi-Fi or 4G/5G cellular network worldwide** without port forwarding or leaving a PC on:
+
+1. Deploy the native Go Connection API server (`tools/tvconnect.go`) on port `8088`:
+   ```bash
+   ./scripts/06_setup_anywhere_api.sh
+   ```
+   This compiles & starts `tvconnect` (with `tools/daemonize.c`) and writes a unique API token to `/sdcard/tv_connect_token.txt`.
+2. Install **Tailscale** (`com.tailscale.ipn`) on the STB and sign in once to join your private encrypted tailnet (`100.x.x.x`).
+3. From anywhere on any network, access:
+   * **Web Dashboard & Live Screen:** `http://<TAILSCALE_IP>:8088/?token=<TOKEN>`
+   * **Remote ADB:** `adb connect <TAILSCALE_IP>:5555`
+   * **REST API Endpoints** (authenticate via `?token=<TOKEN>`, `X-API-Key: <TOKEN>`, or `Authorization: Bearer <TOKEN>`):
+     * `GET /api/ping` — unauthenticated liveness check
+     * `GET /api/health` — device model, Wi-Fi IP, Tailscale IP, active IME
+     * `GET /api/key?code=23` — send Android keycode (`3`=Home, `4`=Back, `19/20/21/22`=D-Pad, `23`=OK, `24/25`=Vol, `85`=Play/Pause)
+     * `GET /api/text?q=hello` — type text into focused TV input
+     * `GET /api/tap?x=960&y=540` / `GET /api/swipe?x1=...&y1=...&x2=...&y2=...` — touch injection
+     * `GET /api/launch?pkg=com.abhinav.cinejoy` — launch any app
+     * `GET /api/open?url=https://...` — open URL on TV
+     * `GET /api/apps` — list installed 3rd-party packages
+     * `GET /api/screen` — live `image/png` TV screenshot
+
+### Additional Installed Stack
+* **On-Screen Keyboard:** LeanKeyboard (`org.liskovsoft.androidtv.rukeyboard/com.liskovsoft.leankeyboard.ime.LeanbackImeService`) set as active `default_input_method` with `show_ime_with_hard_keyboard=1`.
+* **Installer Permissions:** `package_verifier_enable=0`, `install_non_market_apps=1`, `REQUEST_INSTALL_PACKAGES` + `MANAGE_EXTERNAL_STORAGE` allowed for Aurora Store, plus **Shizuku** (`moe.shizuku.privileged.api`) running over ADB.
+* **Casting & Mirroring:** **Google Cast** (`com.google.android.apps.mediashell` updated to `v3.72.446070`), **Miracast Receiver** (`top.jast.miracastreceiver`), and **FCast Receiver** (`com.futo.fcast.receiver`).
+* **Custom TV Apps:** Dedicated `Cinejoy` (`com.abhinav.cinejoy`, source in `tools/cinejoy_tv/`) wrapper for `https://cinejoy.pk/` with Leanback TV banner & D-pad virtual cursor.
 
 ---
 
