@@ -40,7 +40,9 @@ if [ -x "$ROOT/tools/tvconnect_app/build_apk.sh" ] && find "${ANDROID_HOME:-/mnt
   adb -s "$TARGET" install -r -g "$APK" >/dev/null
   adb -s "$TARGET" shell '
     appops set com.abhinav.tvconnect MANAGE_EXTERNAL_STORAGE allow
+    appops set com.abhinav.tvconnect PROJECT_MEDIA allow
     dumpsys deviceidle whitelist +com.abhinav.tvconnect >/dev/null
+    cmd package compile -m speed -f com.abhinav.tvconnect >/dev/null 2>&1 || true
     CUR=$(settings get secure enabled_accessibility_services)
     SVC="com.abhinav.tvconnect/.TvAccessibilityService"
     case "$CUR" in
@@ -54,7 +56,7 @@ if [ -x "$ROOT/tools/tvconnect_app/build_apk.sh" ] && find "${ANDROID_HOME:-/mnt
 fi
 
 STB_IP=$(adb -s "$TARGET" shell "ip -o -4 addr show wlan0 2>/dev/null || ip -o -4 addr show eth0 2>/dev/null" | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '\r')
-TS_IP=$(adb -s "$TARGET" shell "ip -o -4 addr show tun0 2>/dev/null" | awk '{print $4}' | cut -d/ -f1 | head -n 1 | tr -d '\r')
+TS_IP=$(adb -s "$TARGET" shell "ip -o -4 addr show 2>/dev/null | awk '/ tun[0-9]+ /{print \$4}'" | cut -d/ -f1 | head -n 1 | tr -d '\r')
 
 # Ask fallback APK on :8089 to yield :8088 if it was holding :8088 after a reboot.
 if [ -n "$STB_IP" ] && command -v curl >/dev/null 2>&1; then

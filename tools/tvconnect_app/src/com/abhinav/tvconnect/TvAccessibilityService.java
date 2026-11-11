@@ -14,6 +14,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Display;
 import android.view.KeyEvent;
@@ -45,6 +46,7 @@ public class TvAccessibilityService extends AccessibilityService {
     public static volatile boolean running = false;
     public static volatile boolean port8088Bound = false;
     public static volatile boolean port8089Bound = false;
+    public static volatile long consentRequestedAt = 0;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService captureExec = Executors.newSingleThreadExecutor();
@@ -69,7 +71,41 @@ public class TvAccessibilityService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        // Event types kept minimal; no polling overhead.
+        if (consentRequestedAt == 0 || event == null) return;
+        if (SystemClock.uptimeMillis() - consentRequestedAt > 6000) {
+            consentRequestedAt = 0;
+            return;
+        }
+        CharSequence pkg = event.getPackageName();
+        if (pkg == null || !"com.android.systemui".equals(pkg.toString())) return;
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return;
+        if (clickStartNow(root)) {
+            consentRequestedAt = 0;
+        }
+    }
+
+    private boolean clickStartNow(AccessibilityNodeInfo node) {
+        if (node == null) return false;
+        CharSequence txt = node.getText();
+        if (txt != null) {
+            String s = txt.toString().trim().toLowerCase();
+            if ("start now".equals(s) || "allow".equals(s)) {
+                if (node.isClickable()) {
+                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                    return true;
+                }
+                AccessibilityNodeInfo p = node.getParent();
+                if (p != null && p.isClickable()) {
+                    p.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                    return true;
+                }
+            }
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            if (clickStartNow(node.getChild(i))) return true;
+        }
+        return false;
     }
 
     @Override
@@ -231,10 +267,27 @@ public class TvAccessibilityService extends AccessibilityService {
                 return;
             }
 
+            if ("/api/fast_status".equals(path)) {
+                writeJson(out, 200, "{\"ok\":true,\"projection_active\":" + MirrorForegroundService.isActive()
+                    + ",\"seq\":" + MirrorForegroundService.getLatestSeq() + "}");
+                return;
+            }
+
+            if ("/api/start_mirror".equals(path)) {
+                if (!MirrorForegroundService.isProjectionStarted()) {
+                    Intent pi = new Intent(this, ProjectionConsentActivity.class);
+                    pi.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(pi);
+                }
+                writeJson(out, 200, "{\"ok\":true,\"projection_active\":" + MirrorForegroundService.isActive() + "}");
+                return;
+            }
+
             if ("/api/health".equals(path)) {
                 String wifi = TokenStore.getIfaceIP("wlan", "eth");
                 String ts = TokenStore.getIfaceIP("tun");
-                String body = "{\"ok\":true,\"service\":\"tvconnect-apk\",\"model\":\"" + escapeJson(Build.MODEL)
+                String body = "{\"ok\":true,\"service\":\"tvconnect-apk\",\"projection_active\":"
+                    + MirrorForegroundService.isActive() + ",\"model\":\"" + escapeJson(Build.MODEL)
                     + "\",\"device\":\"" + escapeJson(Build.DEVICE)
                     + "\",\"wifi_ip\":\"" + escapeJson(wifi)
                     + "\",\"tailscale_ip\":\"" + escapeJson(ts)
@@ -246,7 +299,11 @@ public class TvAccessibilityService extends AccessibilityService {
             if ("/api/screen.jpg".equals(path) || "/api/screen".equals(path)) {
                 int scale = parseInt(query.get("scale"), 2);
                 int q = parseInt(query.get("q"), 65);
-                byte[] jpg = captureJpeg(scale, q);
+                byte[] jpg = (scale == 2 && MirrorForegroundService.isActive())
+                    ? MirrorForegroundService.getLatestJpeg()
+                    : null;
+                if (jpg == null) jpg = captureJpeg(scale, q);
+                if (jpg == null && MirrorForegroundService.isActive()) jpg = MirrorForegroundService.getLatestJpeg();
                 if (jpg == null) {
                     writeJson(out, 500, "{\"ok\":false,\"error\":\"screenshot failed\"}");
                     return;
@@ -267,8 +324,15 @@ public class TvAccessibilityService extends AccessibilityService {
                     + "Connection: close\r\n\r\n";
                 out.write(hdr.getBytes(StandardCharsets.US_ASCII));
                 out.flush();
+                long lastSeq = -1;
                 while (alive && !s.isClosed()) {
-                    byte[] frame = captureJpeg(scale, q);
+                    byte[] frame;
+                    if (MirrorForegroundService.isActive()) {
+                        frame = MirrorForegroundService.waitNextFrame(lastSeq, 500);
+                        lastSeq = MirrorForegroundService.getLatestSeq();
+                    } else {
+                        frame = captureJpeg(scale, q);
+                    }
                     if (frame != null) {
                         String partHdr = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + frame.length + "\r\n\r\n";
                         out.write(partHdr.getBytes(StandardCharsets.US_ASCII));
@@ -276,7 +340,9 @@ public class TvAccessibilityService extends AccessibilityService {
                         out.write("\r\n".getBytes(StandardCharsets.US_ASCII));
                         out.flush();
                     }
-                    try { Thread.sleep(250); } catch (InterruptedException ie) { break; }
+                    if (!MirrorForegroundService.isActive()) {
+                        try { Thread.sleep(150); } catch (InterruptedException ie) { break; }
+                    }
                 }
                 return;
             }

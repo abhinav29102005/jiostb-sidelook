@@ -137,12 +137,14 @@ class MirrorClientApp:
         self.stop_event = threading.Event()
         self.stream_gen = 0
         self.photo_ref = None
+        self.img_item_id = None
         self.img_rect = (0, 0, 960, 540)
         self.drag_start = None
         self.direct_kbd = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value=f"Connected: {self.base_url}")
 
         self._build_ui()
+        self._send_api("/api/start_mirror")
         self._start_stream_thread()
         self.root.after(15, self._poll_frames)
         self.root.after(200, self._refresh_health_bg)
@@ -213,6 +215,13 @@ class MirrorClientApp:
         self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
         self.root.bind("<KeyPress>", self._on_key_press)
 
+    def _set_status(self, text):
+        if not self.stop_event.is_set():
+            try:
+                self.root.after(0, lambda: self.status_var.set(text))
+            except Exception:
+                pass
+
     def _send_api(self, path):
         def worker():
             sep = "&" if "?" in path else "?"
@@ -221,7 +230,7 @@ class MirrorClientApp:
                 with urllib.request.urlopen(url, timeout=3.0) as resp:
                     resp.read()
             except Exception as e:
-                self.status_var.set(f"Err: {e}")
+                self._set_status(f"Err: {e}")
         threading.Thread(target=worker, daemon=True).start()
 
     def _refresh_health_bg(self):
@@ -232,10 +241,10 @@ class MirrorClientApp:
                     d = json.loads(resp.read().decode("utf-8"))
                 ts = d.get("tailscale_ip") or "off"
                 wf = d.get("wifi_ip") or "-"
-                self.status_var.set(f"WiFi: {wf} | Tailscale: {ts} | Scale 1/{self.scale}")
+                self._set_status(f"WiFi: {wf} | Tailscale: {ts} | Scale 1/{self.scale}")
                 save_config(self.base_url, self.token)
             except Exception:
-                self.status_var.set(f"Reconnecting to {self.base_url}...")
+                self._set_status(f"Reconnecting to {self.base_url}...")
         threading.Thread(target=worker, daemon=True).start()
 
     def _launch_selected_app(self, _e):
@@ -377,8 +386,11 @@ class MirrorClientApp:
                 self.img_rect = (rx, ry, nw, nh)
                 resized = img.resize((nw, nh), Image.Resampling.BILINEAR)
                 self.photo_ref = ImageTk.PhotoImage(resized)
-                self.canvas.delete("all")
-                self.canvas.create_image(rx, ry, anchor=tk.NW, image=self.photo_ref)
+                if self.img_item_id is None:
+                    self.img_item_id = self.canvas.create_image(rx, ry, anchor=tk.NW, image=self.photo_ref)
+                else:
+                    self.canvas.coords(self.img_item_id, rx, ry)
+                    self.canvas.itemconfig(self.img_item_id, image=self.photo_ref)
             except Exception:
                 pass
         self.root.after(15, self._poll_frames)

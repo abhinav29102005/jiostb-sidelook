@@ -150,7 +150,41 @@ func enqueueInput(args ...string) {
 	}
 }
 
-var rawFrameBuf []byte
+var (
+	rawFrameBuf []byte
+	localHTTP   = &http.Client{Timeout: 2 * time.Second}
+)
+
+func is8089ProjectionActive() bool {
+	resp, err := localHTTP.Get("http://127.0.0.1:8089/api/fast_status?token=" + apiToken)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return false
+	}
+	var res struct {
+		ProjectionActive bool `json:"projection_active"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return false
+	}
+	return res.ProjectionActive
+}
+
+func fetch8089Jpeg(scale, quality int) ([]byte, error) {
+	u := fmt.Sprintf("http://127.0.0.1:8089/api/screen.jpg?scale=%d&q=%d&token=%s", scale, quality, apiToken)
+	resp, err := localHTTP.Get(u)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("8089 status %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
 
 func captureJPEG(scale, quality int) ([]byte, error) {
 	if scale < 1 || scale > 4 {
@@ -159,14 +193,22 @@ func captureJPEG(scale, quality int) ([]byte, error) {
 	if quality < 20 || quality > 95 {
 		quality = 65
 	}
+	if scale == 2 && is8089ProjectionActive() {
+		if jpg, err := fetch8089Jpeg(scale, quality); err == nil && len(jpg) > 0 {
+			return jpg, nil
+		}
+	}
 	const tmpRaw = "/data/local/tmp/_tvconnect_frame.raw"
 
 	screenMu.Lock()
-	capCtx, capCancel := context.WithTimeout(context.Background(), 4*time.Second)
+	capCtx, capCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	err := exec.CommandContext(capCtx, "/system/bin/screencap", tmpRaw).Run()
 	capCancel()
 	if err != nil {
 		screenMu.Unlock()
+		if jpg, ferr := fetch8089Jpeg(scale, quality); ferr == nil && len(jpg) > 0 {
+			return jpg, nil
+		}
 		return nil, fmt.Errorf("screencap failed: %w", err)
 	}
 	f, err := os.Open(tmpRaw)
@@ -424,6 +466,17 @@ func main() {
 			return
 		}
 		go func() {
+			for _, cat := range []string{"android.intent.category.LEANBACK_LAUNCHER", "android.intent.category.LAUNCHER"} {
+				if out, err := exec.Command("/system/bin/cmd", "package", "resolve-activity", "--brief", "-c", cat, pkg).Output(); err == nil {
+					lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+					comp := strings.TrimSpace(lines[len(lines)-1])
+					if strings.Contains(comp, "/") && !strings.HasPrefix(comp, "No activity") {
+						if exec.Command("/system/bin/am", "start", "-n", comp).Run() == nil {
+							return
+						}
+					}
+				}
+			}
 			_ = exec.Command("/system/bin/monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1").Run()
 		}()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "pkg": pkg})
@@ -485,9 +538,72 @@ func main() {
 		_, _ = w.Write(jpg)
 	}))
 
+	mux.HandleFunc("/api/start_mirror", withAuth(func(w http.ResponseWriter, r *http.Request) {
+		resp, err := localHTTP.Get("http://127.0.0.1:8089/api/start_mirror?token=" + apiToken)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(b)
+	}))
+
 	mux.HandleFunc("/api/mirror.mjpeg", withAuth(func(w http.ResponseWriter, r *http.Request) {
 		scale, _ := strconv.Atoi(r.URL.Query().Get("scale"))
+		if scale < 1 || scale > 4 {
+			scale = 2
+		}
 		quality, _ := strconv.Atoi(r.URL.Query().Get("q"))
+		if quality < 20 || quality > 95 {
+			quality = 65
+		}
+
+		// Kick off hardware VirtualDisplay on :8089 if not yet running.
+		if !is8089ProjectionActive() {
+			go func() {
+				if resp, err := localHTTP.Get("http://127.0.0.1:8089/api/start_mirror?token=" + apiToken); err == nil {
+					_ = resp.Body.Close()
+				}
+			}()
+		}
+
+		if scale == 2 && is8089ProjectionActive() {
+			streamReq, _ := http.NewRequestWithContext(
+				r.Context(),
+				http.MethodGet,
+				fmt.Sprintf("http://127.0.0.1:8089/api/mirror.mjpeg?scale=2&q=%d&token=%s", quality, apiToken),
+				nil,
+			)
+			streamClient := &http.Client{}
+			if sresp, err := streamClient.Do(streamReq); err == nil {
+				defer sresp.Body.Close()
+				w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+				w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+				w.Header().Set("Pragma", "no-cache")
+				w.Header().Set("Connection", "close")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				flusher, _ := w.(http.Flusher)
+				buf := make([]byte, 32*1024)
+				for {
+					n, rerr := sresp.Body.Read(buf)
+					if n > 0 {
+						if _, werr := w.Write(buf[:n]); werr != nil {
+							return
+						}
+						if flusher != nil {
+							flusher.Flush()
+						}
+					}
+					if rerr != nil {
+						return
+					}
+				}
+			}
+		}
+
 		w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
 		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")

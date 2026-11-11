@@ -113,9 +113,9 @@
     </div>
 
     <div class="screenWrap" id="screenBox" title="Click to Tap • Drag to Swipe • Scroll Wheel for Up/Down">
-      <img id="tvScreen" alt="TV Live Display">
+      <canvas id="tvCanvas" width="960" height="540" style="width:100%;height:100%;object-fit:contain;display:block;pointer-events:none;"></canvas>
       <div class="overlayHint">
-        <span class="pill" id="coordsHint">Click = Tap • Drag = Swipe • Wheel = Scroll</span>
+        <span class="pill" id="coordsHint">Connecting mirror stream...</span>
         <span class="pill" id="modeHint">Keyboard Capture: OFF</span>
       </div>
     </div>
@@ -198,60 +198,102 @@ let streamOn = true;
 let kbdCapture = false;
 let dragStart = null;
 let dragMoved = false;
-let streamTimer = null;
+let streamAbort = null;
+let frameCount = 0;
+let fpsWindowStart = performance.now();
 
-function saveTok() {
-  token = document.getElementById('tok').value.trim();
-  localStorage.setItem('tv_api_token', token);
-  checkHealth();
-  if (streamOn) startStream();
-}
+const canvas = document.getElementById('tvCanvas');
+const ctx2d = canvas.getContext('2d');
 
-async function api(path) {
-  if (!token) return null;
-  const sep = path.includes('?') ? '&' : '?';
-  const r = await fetch(path + sep + 'token=' + encodeURIComponent(token));
-  return r.json();
-}
-
-function k(code) { api('/api/key?code=' + code); }
-function launch(pkg) { api('/api/launch?pkg=' + encodeURIComponent(pkg)); }
-
-async function sendTxt() {
-  const el = document.getElementById('txt');
-  const v = el.value;
-  if (!v) return;
-  await api('/api/text?q=' + encodeURIComponent(v));
-  el.value = '';
-}
-
-function updateStreamURLHint() {
-  const box = document.getElementById('h264Url');
-  if (!token) {
-    box.textContent = 'Set API token to reveal stream URL';
-    return;
+async function drawJpegBytes(u8) {
+  const blob = new Blob([u8], { type: 'image/jpeg' });
+  const bmp = await createImageBitmap(blob);
+  if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+    canvas.width = bmp.width;
+    canvas.height = bmp.height;
   }
-  box.textContent = location.origin + '/api/mirror.h264?token=' + token;
+  ctx2d.drawImage(bmp, 0, 0);
+  bmp.close();
+  frameCount++;
+  const now = performance.now();
+  if (now - fpsWindowStart >= 1000) {
+    const fps = (frameCount * 1000 / (now - fpsWindowStart)).toFixed(1);
+    document.getElementById('coordsHint').textContent = `LIVE ${bmp.width}x${bmp.height} • ${fps} fps`;
+    frameCount = 0;
+    fpsWindowStart = now;
+  }
 }
 
-function startStream() {
-  const img = document.getElementById('tvScreen');
+function findBytes(buf, b0, b1, start) {
+  for (let i = start; i < buf.length - 1; i++) {
+    if (buf[i] === b0 && buf[i + 1] === b1) return i;
+  }
+  return -1;
+}
+
+async function startStream() {
+  stopStream();
   if (!token) return;
-  const q = document.getElementById('qualitySel').value;
-  img.src = '/api/mirror.mjpeg?' + q + '&token=' + encodeURIComponent(token) + '&ts=' + Date.now();
   updateStreamURLHint();
+  const q = document.getElementById('qualitySel').value;
+  api('/api/start_mirror').catch(() => {});
+  const ac = new AbortController();
+  streamAbort = ac;
+  document.getElementById('coordsHint').textContent = 'Starting hardware mirror...';
+
+  while (streamOn && streamAbort === ac && !ac.signal.aborted) {
+    try {
+      const resp = await fetch('/api/mirror.mjpeg?' + q + '&token=' + encodeURIComponent(token) + '&ts=' + Date.now(), { signal: ac.signal });
+      if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+      const reader = resp.body.getReader();
+      let buf = new Uint8Array(0);
+      while (streamOn && streamAbort === ac) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const merged = new Uint8Array(buf.length + value.length);
+        merged.set(buf, 0);
+        merged.set(value, buf.length);
+        buf = merged;
+        while (true) {
+          const soi = findBytes(buf, 0xff, 0xd8, 0);
+          if (soi < 0) {
+            if (buf.length > 65536) buf = buf.slice(buf.length - 4);
+            break;
+          }
+          const eoi = findBytes(buf, 0xff, 0xd9, soi + 2);
+          if (eoi < 0) {
+            if (soi > 0) buf = buf.slice(soi);
+            break;
+          }
+          const jpg = buf.slice(soi, eoi + 2);
+          buf = buf.slice(eoi + 2);
+          await drawJpegBytes(jpg);
+        }
+      }
+    } catch (e) {
+      if (ac.signal.aborted || !streamOn) break;
+      document.getElementById('coordsHint').textContent = 'Reconnecting mirror...';
+      try {
+        const r = await fetch('/api/screen.jpg?' + q + '&token=' + encodeURIComponent(token) + '&ts=' + Date.now(), { signal: ac.signal });
+        if (r.ok) await drawJpegBytes(new Uint8Array(await r.arrayBuffer()));
+      } catch (_) {}
+      await new Promise(r => setTimeout(r, 400));
+    }
+  }
 }
 
 function stopStream() {
-  const img = document.getElementById('tvScreen');
-  img.removeAttribute('src');
+  if (streamAbort) {
+    streamAbort.abort();
+    streamAbort = null;
+  }
 }
 
-function snapOnce() {
+async function snapOnce() {
   if (!token) return;
-  const img = document.getElementById('tvScreen');
   const q = document.getElementById('qualitySel').value;
-  img.src = '/api/screen.jpg?' + q + '&token=' + encodeURIComponent(token) + '&ts=' + Date.now();
+  const r = await fetch('/api/screen.jpg?' + q + '&token=' + encodeURIComponent(token) + '&ts=' + Date.now());
+  if (r.ok) await drawJpegBytes(new Uint8Array(await r.arrayBuffer()));
 }
 
 function toggleStream() {
@@ -331,11 +373,39 @@ window.addEventListener('keydown', (ev) => {
   }
 });
 
-document.getElementById('tvScreen').addEventListener('error', () => {
-  if (!streamOn || !token) return;
-  clearTimeout(streamTimer);
-  streamTimer = setTimeout(startStream, 1200);
-});
+async function saveTok() {
+  token = document.getElementById('tok').value.trim();
+  localStorage.setItem('tv_api_token', token);
+  checkHealth();
+  if (streamOn) startStream();
+}
+
+async function api(path) {
+  if (!token) return null;
+  const sep = path.includes('?') ? '&' : '?';
+  const r = await fetch(path + sep + 'token=' + encodeURIComponent(token));
+  return r.json();
+}
+
+function k(code) { api('/api/key?code=' + code); }
+function launch(pkg) { api('/api/launch?pkg=' + encodeURIComponent(pkg)); }
+
+async function sendTxt() {
+  const el = document.getElementById('txt');
+  const v = el.value;
+  if (!v) return;
+  await api('/api/text?q=' + encodeURIComponent(v));
+  el.value = '';
+}
+
+function updateStreamURLHint() {
+  const box = document.getElementById('h264Url');
+  if (!token) {
+    box.textContent = 'Set API token to reveal stream URL';
+    return;
+  }
+  box.textContent = location.origin + '/api/mirror.h264?token=' + token;
+}
 
 async function checkHealth() {
   const info = document.getElementById('netInfo');

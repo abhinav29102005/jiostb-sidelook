@@ -271,6 +271,12 @@ In normal everyday TV usage:
 
 ---
 
+### 4. Smooth Live Mirror & Speed Tuning
+* **Hardware `MediaProjection` Live Mirror**: `com.abhinav.tvconnect` runs [`MirrorForegroundService`](tools/tvconnect_app/src/com/abhinav/tvconnect/MirrorForegroundService.java) (`960x540` `VirtualDisplay` + `ImageReader`, up to ~22 FPS on live motion and 2 FPS idle keepalive, exposed via `/api/start_mirror`, `/api/fast_status`, `/api/mirror.mjpeg`, and `/api/screen.jpg`). The web remote renders MJPEG via `fetch()` `ReadableStream` + `createImageBitmap` onto `<canvas>`, and [`tools/laptop_mirror_client.py`](tools/laptop_mirror_client.py) provides a thread-safe Tkinter viewer.
+* **OS Speed Tuning**: Animations set to `0` (`window_animation_scale`, `transition_animation_scale`, `animator_duration_scale`), `activity_manager_constants` set to `max_cached_processes=6,background_settle_time=10000`, `cmd package compile -m speed -f` on launcher/connect/IME apps, and background-restricted idle streaming apps.
+
+---
+
 ## 🛠️ Diagnostics
 To verify your box's status at any time, run:
 ```bash
