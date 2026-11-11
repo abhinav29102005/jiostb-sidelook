@@ -210,7 +210,7 @@ View the STB live display and control it (mouse tap/drag, keyboard arrows/typing
    * `GET /api/launch?pkg=com.abhinav.cinejoy` / `GET /api/open?url=https://...` / `GET /api/apps`
 
 ### Additional Installed Stack & System Hardening
-* **Private DNS & Telemetry Hardening:** `private_dns_mode=hostname` set to `dns.adguard-dns.com`, `captive_portal_mode=0`, `wifi_sleep_policy=2`, `stay_on_while_plugged_in=3`, animations `0.25x`, and leftover non-TV AOSP services (`bips`, `svox.pico`, `musicfx`, `userdictionary`, `mtp`, `bluetoothmidiservice`) stripped alongside Jio bloat.
+* **Private DNS & Telemetry Hardening:** `private_dns_mode=opportunistic` (compatible with Tailscale VPN DNS; or `hostname` + `dns.adguard-dns.com` when not using Tailscale), `captive_portal_mode=0`, `wifi_sleep_policy=2`, `stay_on_while_plugged_in=3`, animations `0.25x`, and leftover non-TV AOSP services (`bips`, `svox.pico`, `musicfx`, `userdictionary`, `mtp`, `bluetoothmidiservice`) stripped alongside Jio bloat.
 * **On-Screen Keyboard:** LeanKeyboard (`org.liskovsoft.androidtv.rukeyboard/com.liskovsoft.leankeyboard.ime.LeanbackImeService`) set as active `default_input_method` with `show_ime_with_hard_keyboard=1`.
 * **Installer Permissions:** `package_verifier_enable=0`, `install_non_market_apps=1`, `REQUEST_INSTALL_PACKAGES` + `MANAGE_EXTERNAL_STORAGE` allowed for Aurora Store, plus **Shizuku** (`moe.shizuku.privileged.api`) running over ADB.
 * **Casting & Mirroring:** **Google Cast** (`com.google.android.apps.mediashell` updated to `v3.72.446070`), **Miracast Receiver** (`top.jast.miracastreceiver`), and **FCast Receiver** (`com.futo.fcast.receiver`).
